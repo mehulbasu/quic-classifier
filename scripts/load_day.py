@@ -37,11 +37,37 @@ TARGET_COLUMN = "APP"
 CACHE_DIR = Path("datasets/cache")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
+
+def _parquet_candidate(path: Path) -> Path:
+    if path.suffix == ".parquet":
+        return path
+    if path.name.endswith(".csv.gz"):
+        return path.with_suffix("").with_suffix(".parquet")
+    return path.with_suffix(".parquet")
+
+
+def _resolve_input_path(path: Path) -> Path:
+    candidate = _parquet_candidate(path)
+    if candidate.suffix == ".parquet" and candidate.exists():
+        return candidate
+    return path
+
 def load_day(path: Path, feature_columns: List[str]) -> pd.DataFrame:
     """Read a gzipped daily CSV and keep only the selected columns plus the label."""
     cols_to_keep = feature_columns + [TARGET_COLUMN]
-    print("Loading data from:", path)
-    df = pd.read_csv(path, compression="gzip", usecols=cols_to_keep, low_memory=False)
+    actual_path = _resolve_input_path(path)
+    if actual_path.suffix == ".parquet":
+        print("Loading data from Parquet:", actual_path)
+        df = pd.read_parquet(actual_path, columns=cols_to_keep)
+    else:
+        compression = "gzip" if ".gz" in actual_path.suffixes else "infer"
+        print("Loading data from CSV:", actual_path)
+        df = pd.read_csv(
+            actual_path,
+            compression=compression,
+            usecols=cols_to_keep,
+            low_memory=False,
+        )
     return df.dropna(subset=[TARGET_COLUMN])
 
 def prepare_matrices(
