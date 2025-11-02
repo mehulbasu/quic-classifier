@@ -6,11 +6,14 @@ Update DATA_PATH before running this module.
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 from typing import List, Tuple
 
+import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
+from joblib import dump, load
 
 # Adjust this path before running. Keep it pointed at one day's flows CSV.
 DATA_PATH = Path("datasets/cesnet-quic22/W-2022-47/1_Mon/flows-20221121.csv.gz")
@@ -31,6 +34,8 @@ FEATURE_COLUMNS: List[str] = [
 ]
 
 TARGET_COLUMN = "APP"
+CACHE_DIR = Path("datasets/cache")
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 def load_day(path: Path, feature_columns: List[str]) -> pd.DataFrame:
     """Read a gzipped daily CSV and keep only the selected columns plus the label."""
@@ -48,7 +53,9 @@ def prepare_matrices(
     y_raw = df[TARGET_COLUMN].astype(str)
 
     encoder = LabelEncoder()
-    y = pd.Series(encoder.fit_transform(y_raw), index=y_raw.index, name=TARGET_COLUMN)
+    encoded_array = np.asarray(encoder.fit_transform(y_raw), dtype=np.int32)
+    encoded_list = encoded_array.tolist()
+    y = pd.Series(encoded_list, index=y_raw.index, name=TARGET_COLUMN)
     return X, y, encoder
 
 def train_validation_split(
@@ -59,13 +66,69 @@ def train_validation_split(
     random_state: int = 42,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
     """Create a reproducible train/validation split with stratification."""
-    return train_test_split(
+    X_train, X_val, y_train, y_val = train_test_split(
         X,
         y,
         test_size=test_size,
         random_state=random_state,
         stratify=y,
     )
+    return X_train, X_val, y_train, y_val
+
+def _cache_key(path: Path, feature_columns: List[str]) -> str:
+    joined = ",".join(feature_columns)
+    digest = hashlib.sha1(joined.encode("utf-8")).hexdigest()[:12]
+    return f"{path.stem}_{digest}"
+
+
+def load_cached_training_matrices(
+    path: Path,
+    feature_columns: List[str],
+    use_cache: bool = True,
+) -> Tuple[pd.DataFrame, pd.Series, LabelEncoder]:
+    key = _cache_key(path, feature_columns)
+    X_path = CACHE_DIR / f"{key}_X.joblib"
+    y_path = CACHE_DIR / f"{key}_y.joblib"
+    enc_path = CACHE_DIR / f"{key}_encoder.joblib"
+
+    if use_cache and X_path.exists() and y_path.exists() and enc_path.exists():
+        X = load(X_path)
+        y = load(y_path)
+        encoder = load(enc_path)
+        return X, y, encoder
+
+    df = load_day(path, feature_columns)
+    X, y, encoder = prepare_matrices(df, feature_columns)
+
+    if use_cache:
+        dump(X, X_path)
+        dump(y, y_path)
+        dump(encoder, enc_path)
+
+    return X, y, encoder
+
+
+def load_cached_features_with_labels(
+    path: Path,
+    feature_columns: List[str],
+    use_cache: bool = True,
+) -> Tuple[pd.DataFrame, pd.Series]:
+    key = _cache_key(path, feature_columns)
+    X_path = CACHE_DIR / f"{key}_eval_X.joblib"
+    label_path = CACHE_DIR / f"{key}_eval_labels.joblib"
+
+    if use_cache and X_path.exists() and label_path.exists():
+        return load(X_path), load(label_path)
+
+    df = load_day(path, feature_columns)
+    features = df[feature_columns].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    labels = df[TARGET_COLUMN].astype(str)
+
+    if use_cache:
+        dump(features, X_path)
+        dump(labels, label_path)
+
+    return features, labels
 
 def main() -> None:
     df = load_day(DATA_PATH, FEATURE_COLUMNS)
