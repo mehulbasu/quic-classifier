@@ -2,10 +2,14 @@
 
 This document outlines the progress made on the QUIC traffic classification project. It follows the journey from initial setup and baseline modeling to advanced feature engineering, GPU acceleration, and the challenges encountered when scaling the process to handle large, week-long datasets.
 
+## Phase 0: Dataset Selection
+
+Found a large (one-month long) QUIC network traffic dataset **CESNET-QUIC22**. Paper can be found at https://doi.org/10.1016/j.dib.2023.108888, it describes the dataset structure and experimental methods regarding data collection, filtration, sampling, etc. Dataset is available at https://zenodo.org/records/10728760.
+
 ## Phase 1: Initial Setup and Baseline Modeling
 
 **Objective:** Establish a baseline for classifying QUIC traffic by training a simple machine learning model on a single day of data.
-
+2
 ### Step 1: Data Loading and Initial Scripting
 The project began with the goal of training a `DecisionTreeClassifier`. The first step was to create a script, `scripts/load_day.py`, to handle data ingestion from the `cesnet-quic22` dataset. The initial version focused on:
 - Loading a single day's data from a `.csv.gz` file using `pandas`.
