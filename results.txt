@@ -1,0 +1,102 @@
+scripts.train_random_forest_cuml
+Training samples: 1000000
+Unique classes: 105
+Training time (GPU): 21.6s
+Loading data from Parquet: datasets/cesnet-quic22/W-2022-47/3_Wed/flows-20221123.parquet
+Evaluation samples: 1000000
+Accuracy: 0.5498
+Macro F1: 0.3093
+Classification report (top 10 classes by support):
+google-www                prec=0.512 rec=0.519 f1=0.516 support=71636
+google-ads                prec=0.346 rec=0.525 f1=0.417 support=69748
+google-services           prec=0.817 rec=0.760 f1=0.787 support=60512
+google-play               prec=0.508 rec=0.733 f1=0.600 support=55311
+google-gstatic            prec=0.846 rec=0.697 f1=0.764 support=51278
+google-background         prec=0.384 rec=0.298 f1=0.336 support=46330
+youtube                   prec=0.507 rec=0.469 f1=0.487 support=44735
+google-fonts              prec=0.489 rec=0.686 f1=0.571 support=42650
+instagram                 prec=0.557 rec=0.677 f1=0.611 support=41964
+default-background        prec=0.375 rec=0.236 f1=0.290 support=37699
+
+scripts.train_random_forest
+Training samples: 1000000
+Unique classes: 105
+Training time: 249.2s
+Evaluation samples: 1000000
+Accuracy: 0.5694
+Macro F1: 0.3658
+Classification report (top 10 classes by support):
+google-www                prec=0.849 rec=0.483 f1=0.615 support=71636
+google-ads                prec=0.696 rec=0.322 f1=0.440 support=69748
+google-services           prec=0.903 rec=0.761 f1=0.826 support=60512
+google-play               prec=0.731 rec=0.682 f1=0.705 support=55311
+google-gstatic            prec=0.923 rec=0.701 f1=0.797 support=51278
+google-background         prec=0.691 rec=0.315 f1=0.433 support=46330
+youtube                   prec=0.695 rec=0.442 f1=0.540 support=44735
+google-fonts              prec=0.696 rec=0.635 f1=0.664 support=42650
+instagram                 prec=0.737 rec=0.602 f1=0.663 support=41964
+default-background        prec=0.779 rec=0.117 f1=0.203 support=37699
+
+--------------------MODIFIED FEATURE SELECTION--------------------
+
+scripts.train_random_forest_cuml --n-estimators 600 --max-depth 20 --n-bins 80 --min-samples-leaf 5
+Training samples: 1000000
+Unique classes: 105
+Parameters: n_estimators=600 max_depth=20 min_samples_leaf=5 n_bins=80 n_streams=8
+Training time (GPU): 83.9s
+Evaluation samples: 1000000
+Accuracy: 0.6817
+Macro F1: 0.4712
+Classification report (top 10 classes by support):
+google-www                prec=0.631 rec=0.643 f1=0.637 support=71636
+google-ads                prec=0.454 rec=0.610 f1=0.520 support=69748
+google-services           prec=0.839 rec=0.816 f1=0.827 support=60512
+google-play               prec=0.647 rec=0.772 f1=0.704 support=55311
+google-gstatic            prec=0.873 rec=0.733 f1=0.797 support=51278
+google-background         prec=0.539 rec=0.400 f1=0.459 support=46330
+youtube                   prec=0.632 rec=0.558 f1=0.593 support=44735
+google-fonts              prec=0.578 rec=0.741 f1=0.649 support=42650
+instagram                 prec=0.824 rec=0.853 f1=0.838 support=41964
+default-background        prec=0.481 rec=0.628 f1=0.545 support=37699
+
+scripts.train_random_forest
+Loading data from Parquet: datasets/cesnet-quic22/W-2022-47/1_Mon/flows-20221121.parquet
+Preparing feature matrix and labels.
+Training samples: 1000000
+Unique classes: 105
+Training time: 347.7s
+Loading data from Parquet: datasets/cesnet-quic22/W-2022-47/3_Wed/flows-20221123.parquet
+Evaluation samples: 1000000
+Accuracy: 0.6598
+Macro F1: 0.4831
+Classification report (top 10 classes by support):
+google-www                prec=0.842 rec=0.530 f1=0.650 support=71636
+google-ads                prec=0.666 rec=0.412 f1=0.509 support=69748
+google-services           prec=0.897 rec=0.792 f1=0.841 support=60512
+google-play               prec=0.736 rec=0.734 f1=0.735 support=55311
+google-gstatic            prec=0.917 rec=0.724 f1=0.809 support=51278
+google-background         prec=0.660 rec=0.376 f1=0.479 support=46330
+youtube                   prec=0.690 rec=0.531 f1=0.600 support=44735
+google-fonts              prec=0.677 rec=0.703 f1=0.689 support=42650
+instagram                 prec=0.852 rec=0.807 f1=0.829 support=41964
+default-background        prec=0.868 rec=0.142 f1=0.245 support=37699
+
+scripts.train_random_forest_cuml
+Training samples: 1000000
+Unique classes: 105
+Parameters: n_estimators=400 max_depth=16 min_samples_leaf=10 n_bins=64 n_streams=8
+Training time (GPU): 29.1s
+Evaluation samples: 1000000
+Accuracy: 0.638
+Macro F1: 0.397
+Classification report (top 10 classes by support):
+google-www                prec=0.582 rec=0.591 f1=0.587 support=71636
+google-ads                prec=0.378 rec=0.577 f1=0.456 support=69748
+google-services           prec=0.811 rec=0.784 f1=0.797 support=60512
+google-play               prec=0.572 rec=0.745 f1=0.647 support=55311
+google-gstatic            prec=0.859 rec=0.704 f1=0.774 support=51278
+google-background         prec=0.496 rec=0.304 f1=0.377 support=46330
+youtube                   prec=0.598 rec=0.497 f1=0.543 support=44735
+google-fonts              prec=0.547 rec=0.714 f1=0.619 support=42650
+instagram                 prec=0.802 rec=0.844 f1=0.822 support=41964
+default-background        prec=0.425 rec=0.614 f1=0.503 support=37699
