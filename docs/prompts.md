@@ -1,0 +1,18 @@
+Read the provided dataset.md and proposal.md files to understand the data we are working with and the scope of the project. I want to be able to train a baseline decision tree model by the end of the day. Currently I have `cesnet-quic22.zip` downloaded. I'm thinking something like first training a model using only one day's worth of data, and then testing the model inference with a different day of data. What do you think of that approach? If that goes well then we could retrain the model on a month of data and see how the performance improves.
+
+I have unzipped `cesnet-quic22.zip` into `datasets/`, resulting in a file structure as described in dataset.md. Can you write Python code to load one day (I will specify file path at the top) into Pandas? Keep in mind the files are of type `.csv.gz`. I have some more questions:
+- How do I go about selecting a feature subset after that?
+- What does it mean to label-encode `APP`? How do I do that?
+- What does it mean to split features/labels? How do I do that?
+Please implement anything related to the above questions in your code if possible, and then explain it to me.
+
+For some context, I am running these programs on a machine with 2x 16-core AMD 7302 @ 3.00GHz (64 threads total), 128GB ECC Memory, and an NVIDIA 24GB Ampre A30 GPU. I want to maximize my use of these resources in training and running my ML model. How can this be done? As per my understanding scikit-learn doesn't even utilize the GPU.
+Secondly, it seems that the data loading and matrix preparation (split the dataframe into numeric features and label-encoded targets) are repetitive steps prior to the start of training which are independent of model selection and its parameters. If that is true, can these be cached in some way so that each program run doesn't have to repeat it?
+
+Let's first convert daily CSVs to Parquet to shrink load times and test it. Then, create a new file for training a random forest model on this data so we can benchmark it with the decision tree model. 
+
+Earlier you mentioned "If you stay in Python/NumPy land, RAPIDS cuDF/cuML is another route (GPU DataFrame + GPU scikit-learn analogues)". I think this is a good step to take next. Keeping the existing sklearn implementations intact, in a new file, can you implement a random forest model with RAPIDS cuML? Let's train and test it with the same two days' datasets as we did for the ones prior.
+
+Why is the sklearn random forest model working noticeably better than the cuML version? Regardless, they both aren't performing very well right now. How do I get the cuML classifier to an accuracy of >80%?
+
+Let's first widen the feature list in `load_day.py`. Include all the features which you deem relevant to traffic classification. Make sure to cache them as well so the preprocessed data is available for use on any model we further develop. Rerun cuML forest with its existing configuration. Then, run cuML forest with deeper trees and more estimators. Compare if/how the accuracy improves.
