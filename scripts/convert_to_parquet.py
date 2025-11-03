@@ -12,17 +12,29 @@ Usage examples:
 from __future__ import annotations
 
 import argparse
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from time import perf_counter
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Sequence
 
 import pandas as pd
 
 # Expose a default so the script can be run without arguments during prototyping.
-DEFAULT_INPUTS = [
-    Path("datasets/cesnet-quic22/W-2022-47/1_Mon/flows-20221121.csv.gz"),
-    Path("datasets/cesnet-quic22/W-2022-47/3_Wed/flows-20221123.csv.gz")
-]
+DEFAULT_INPUTS: Sequence[Path] = (
+    Path("datasets/cesnet-quic22/W-2022-47/2_Tue/flows-20221122.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-47/4_Thu/flows-20221124.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-47/5_Fri/flows-20221125.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-47/6_Sat/flows-20221126.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-47/7_Sun/flows-20221127.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-46/1_Mon/flows-20221114.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-46/2_Tue/flows-20221115.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-46/3_Wed/flows-20221116.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-46/4_Thu/flows-20221117.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-46/5_Fri/flows-20221118.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-46/6_Sat/flows-20221119.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-46/7_Sun/flows-20221120.csv.gz"),
+)
 
 CHUNKSIZE = 1_000_000
 PARQUET_COMPRESSION = "snappy"
@@ -93,7 +105,8 @@ def convert_csv_to_parquet(
     if writer is not None:
         writer.close()
     else:  # No rows were read; create an empty Parquet file.
-        empty_table = pa.Table.from_pandas(pd.DataFrame(columns=columns or []))
+        column_names = list(columns) if columns else []
+        empty_table = pa.Table.from_pandas(pd.DataFrame(columns=column_names))
         pq.write_table(empty_table, parquet_path, compression=PARQUET_COMPRESSION)
 
     elapsed = perf_counter() - start
@@ -130,22 +143,51 @@ def parse_args() -> argparse.Namespace:
         default=CHUNKSIZE,
         help=f"Number of rows per chunk when streaming the CSV (default={CHUNKSIZE}).",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Number of parallel worker processes (default: min(cpu_count, number of inputs)).",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
 
-    inputs = args.inputs if args.inputs else DEFAULT_INPUTS
-    outputs = []
-    for csv_path in inputs:
-        parquet_path = convert_csv_to_parquet(
-            csv_path,
-            output_path=_candidate_parquet_path(csv_path, args.output_dir) if args.output_dir else None,
-            chunksize=args.chunksize,
-            columns=args.columns,
-        )
-        outputs.append(parquet_path)
+    inputs = list(args.inputs) if args.inputs else list(DEFAULT_INPUTS)
+    if not inputs:
+        raise SystemExit("No input files provided.")
+
+    max_workers = args.workers or min(len(inputs), (os.cpu_count() or 1))
+    outputs: list[Path] = []
+    if max_workers <= 1:
+        for csv_path in inputs:
+            parquet_path = convert_csv_to_parquet(
+                csv_path,
+                output_path=_candidate_parquet_path(csv_path, args.output_dir) if args.output_dir else None,
+                chunksize=args.chunksize,
+                columns=args.columns,
+            )
+            outputs.append(parquet_path)
+    else:
+        ordered_outputs: list[Optional[Path]] = [None] * len(inputs)
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    convert_csv_to_parquet,
+                    csv_path,
+                    output_path=_candidate_parquet_path(csv_path, args.output_dir) if args.output_dir else None,
+                    chunksize=args.chunksize,
+                    columns=args.columns,
+                ): idx
+                for idx, csv_path in enumerate(inputs)
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                parquet_path = future.result()
+                ordered_outputs[idx] = parquet_path
+        outputs = [path for path in ordered_outputs if path is not None]
 
     print("Generated Parquet files:")
     for path in outputs:
