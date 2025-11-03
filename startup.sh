@@ -15,6 +15,9 @@ sudo apt install -y python3.10-venv
 echo "Installing Ubuntu drivers common package..."
 sudo apt install -y ubuntu-drivers-common
 
+echo "Installing CUDA toolkit..."
+sudo apt install -y nvidia-cuda-toolkit
+
 echo "Installing NVIDIA driver 580..."
 sudo apt install -y nvidia-driver-580
 
