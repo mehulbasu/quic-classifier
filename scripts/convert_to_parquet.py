@@ -21,6 +21,7 @@ import pandas as pd
 # Expose a default so the script can be run without arguments during prototyping.
 DEFAULT_INPUTS = [
     Path("datasets/cesnet-quic22/W-2022-47/1_Mon/flows-20221121.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-47/3_Wed/flows-20221123.csv.gz")
 ]
 
 CHUNKSIZE = 1_000_000
