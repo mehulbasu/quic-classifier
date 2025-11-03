@@ -53,12 +53,13 @@ def main() -> None:
         verbose=0,
     )
 
+    print("Training samples:", len(X_train))
+    print("Unique classes:", len(encoder.classes_))
+
     start = perf_counter()
     model.fit(X_train, y_train)
     train_time = perf_counter() - start
 
-    print("Training samples:", len(X_train))
-    print("Unique classes:", len(encoder.classes_))
     print(f"Training time: {train_time:.1f}s")
 
     eval_features_full, eval_labels_raw = load_cached_features_with_labels(
