@@ -1,14 +1,15 @@
-"""Train a Random Forest using RAPIDS cuML on GPU and evaluate on another day."""
+"""Train a week-long Random Forest using RAPIDS cuML and evaluate on another week."""
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Dict, Optional, Tuple, cast
+from typing import Dict, List, Optional, Tuple, cast
 
 import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, classification_report, f1_score
+from sklearn.preprocessing import LabelEncoder
 
 try:
     import cudf
@@ -21,25 +22,27 @@ except ImportError as exc:  # pragma: no cover - runtime guard
 from scripts.load_day import (
     FEATURE_COLUMNS,
     TARGET_COLUMN,
-    load_cached_features_with_labels,
-    load_cached_training_matrices,
+    load_cached_week_features_with_labels,
 )
 
-TRAIN_DAY = Path("datasets/cesnet-quic22/W-2022-47/1_Mon/flows-20221121.parquet")
-EVAL_DAY = Path("datasets/cesnet-quic22/W-2022-47/3_Wed/flows-20221123.parquet")
-
-DEFAULT_SAMPLE_LIMIT: Optional[int] = 1_000_000
+DEFAULT_DATASET_ROOT = Path("datasets/cesnet-quic22")
+DEFAULT_TRAIN_WEEK = "W-2022-47"
+DEFAULT_EVAL_WEEK = "W-2022-46"
+DEFAULT_EVAL_SAMPLE_LIMIT: Optional[int] = 1_000_000
 DEFAULT_USE_CACHE = True
 RANDOM_STATE = 42
-DEFAULT_N_ESTIMATORS = 400
+DEFAULT_N_ESTIMATORS = 100
 DEFAULT_MAX_DEPTH = 16
-DEFAULT_MIN_SAMPLES_LEAF = 10
+DEFAULT_MIN_SAMPLES_LEAF = 5
 DEFAULT_N_BINS = 64
 DEFAULT_N_STREAMS = 8
+DEFAULT_MAX_BATCH_SIZE = 50
 
 
-def sample_matrices(
-    X: pd.DataFrame, y: pd.Series, limit: Optional[int]
+def maybe_sample_aligned(
+    X: pd.DataFrame,
+    y: pd.Series,
+    limit: Optional[int],
 ) -> Tuple[pd.DataFrame, pd.Series]:
     if limit is None or len(X) <= limit:
         return X, y
@@ -56,6 +59,28 @@ def to_cudf_frame(X: pd.DataFrame) -> cudf.DataFrame:
 def to_cudf_series(y: pd.Series) -> cudf.Series:
     # cuDF prefers 0-based contiguous integers
     return cudf.Series(y.values.astype(np.int32))
+
+
+def list_week_files(dataset_root: Path, week: str) -> List[Path]:
+    week_dir = dataset_root / week
+    if not week_dir.exists():
+        raise FileNotFoundError(f"Week directory does not exist: {week_dir}")
+
+    day_files: List[Path] = []
+    for day_dir in sorted(p for p in week_dir.iterdir() if p.is_dir()):
+        parquet_files = sorted(day_dir.glob("flows-*.parquet"))
+        if parquet_files:
+            day_files.append(parquet_files[0])
+            continue
+        csv_files = sorted(day_dir.glob("flows-*.csv.gz"))
+        if csv_files:
+            day_files.append(csv_files[0])
+            continue
+        raise FileNotFoundError(f"No CSV or Parquet file found in {day_dir}")
+
+    if not day_files:
+        raise FileNotFoundError(f"No daily files discovered under {week_dir}")
+    return day_files
 
 
 def parse_args() -> argparse.Namespace:
@@ -93,10 +118,40 @@ def parse_args() -> argparse.Namespace:
         help="Number of CUDA streams used during training (default: %(default)s).",
     )
     parser.add_argument(
-        "--sample-limit",
+        "--max-batch-size",
         type=int,
-        default=DEFAULT_SAMPLE_LIMIT if DEFAULT_SAMPLE_LIMIT is not None else -1,
-        help="Maximum rows sampled from each day (-1 to use all rows).",
+        default=DEFAULT_MAX_BATCH_SIZE,
+        help="Maximum tree nodes processed per batch (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--dataset-root",
+        type=Path,
+        default=DEFAULT_DATASET_ROOT,
+        help="Root directory containing weekly subfolders (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--train-week",
+        type=str,
+        default=DEFAULT_TRAIN_WEEK,
+        help="Week folder name for training data (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--eval-week",
+        type=str,
+        default=DEFAULT_EVAL_WEEK,
+        help="Week folder name for evaluation data (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--train-sample-limit",
+        type=int,
+        default=-1,
+        help="Optional cap on training rows (-1 to use full week).",
+    )
+    parser.add_argument(
+        "--eval-sample-limit",
+        type=int,
+        default=DEFAULT_EVAL_SAMPLE_LIMIT if DEFAULT_EVAL_SAMPLE_LIMIT is not None else -1,
+        help="Rows sampled for evaluation (-1 to use all rows).",
     )
     parser.add_argument(
         "--disable-cache",
@@ -108,17 +163,44 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    sample_limit: Optional[int] = (
-        None if args.sample_limit is not None and args.sample_limit < 0 else args.sample_limit
-    )
     use_cache = not args.disable_cache and DEFAULT_USE_CACHE
 
-    X_train_full, y_train_full, encoder = load_cached_training_matrices(
-        TRAIN_DAY,
+    dataset_root = args.dataset_root
+    train_week = args.train_week
+    eval_week = args.eval_week
+
+    train_paths = list_week_files(dataset_root, train_week)
+    eval_paths = list_week_files(dataset_root, eval_week)
+
+    train_sample_limit: Optional[int] = None if args.train_sample_limit < 0 else args.train_sample_limit
+    eval_sample_limit: Optional[int] = (
+        None if args.eval_sample_limit is not None and args.eval_sample_limit < 0 else args.eval_sample_limit
+    )
+
+    # Step 1: load/cached features for the entire training week.
+    X_train_full, y_train_labels = load_cached_week_features_with_labels(
+        train_paths,
         FEATURE_COLUMNS,
+        cache_prefix=f"train_{train_week}",
         use_cache=use_cache,
     )
-    X_train, y_train = sample_matrices(X_train_full, y_train_full, sample_limit)
+    X_train_full = X_train_full.astype(np.float32, copy=False)
+    y_train_labels = y_train_labels.astype(str)
+
+    encoder = LabelEncoder()
+    y_train_encoded = encoder.fit_transform(y_train_labels)
+    y_train_series = pd.Series(
+        np.asarray(y_train_encoded, dtype=np.int32),
+        name=TARGET_COLUMN,
+    )
+
+    total_training_rows = len(X_train_full)
+
+    X_train, y_train = maybe_sample_aligned(
+        X_train_full,
+        y_train_series,
+        train_sample_limit,
+    )
 
     X_train_gpu = to_cudf_frame(X_train)
     y_train_gpu = to_cudf_series(y_train)
@@ -130,16 +212,28 @@ def main() -> None:
         min_samples_leaf=args.min_samples_leaf,
         n_streams=args.n_streams,
         n_bins=args.n_bins,
+        max_batch_size=args.max_batch_size,
         random_state=RANDOM_STATE,
     )
 
+    print("Training week:", train_week)
+    print("Training files:")
+    for path in train_paths:
+        print(" -", path)
     print("Training samples:", len(X_train))
+    if train_sample_limit is not None:
+        print("Total training rows before sampling:", total_training_rows)
     print("Unique classes:", len(encoder.classes_))
     print(
         f"Parameters: n_estimators={args.n_estimators} max_depth={args.max_depth} "
         f"min_samples_leaf={args.min_samples_leaf} n_bins={args.n_bins} "
-        f"n_streams={args.n_streams}"
+        f"n_streams={args.n_streams} max_batch_size={args.max_batch_size}"
     )
+
+    class_counts = y_train_labels.value_counts().head(10)
+    print("Top 10 classes by training support:")
+    for label, count in class_counts.items():
+        print(f" {label:25s} {count:>10d}")
 
     start = perf_counter()
     model.fit(X_train_gpu, y_train_gpu)
@@ -147,21 +241,26 @@ def main() -> None:
 
     print(f"Training time (GPU): {train_time:.1f}s")
 
-    eval_features_full, eval_labels_raw = load_cached_features_with_labels(
-        EVAL_DAY,
+    eval_features_full, eval_labels_raw = load_cached_week_features_with_labels(
+        eval_paths,
         FEATURE_COLUMNS,
+        cache_prefix=f"eval_{eval_week}",
         use_cache=use_cache,
     )
+    eval_features_full = eval_features_full.astype(np.float32, copy=False)
+    eval_labels_raw = eval_labels_raw.astype(str)
     overlap_mask = eval_labels_raw.isin(encoder.classes_)
     if not overlap_mask.any():
         raise ValueError("Evaluation dataframe has no overlapping labels with training set.")
 
     eval_features_full = eval_features_full.loc[overlap_mask]
     eval_labels_raw = eval_labels_raw.loc[overlap_mask]
-    eval_features, eval_labels_raw = sample_matrices(
+    total_eval_rows = len(eval_features_full)
+
+    eval_features, eval_labels_raw = maybe_sample_aligned(
         eval_features_full,
         eval_labels_raw,
-        sample_limit,
+        eval_sample_limit,
     )
     encoded_eval = np.asarray(encoder.transform(eval_labels_raw), dtype=np.int32)
     eval_labels = pd.Series(encoded_eval.tolist(), index=eval_labels_raw.index, name=TARGET_COLUMN)
@@ -177,7 +276,13 @@ def main() -> None:
     accuracy = accuracy_score(eval_labels, y_pred)
     macro_f1 = f1_score(eval_labels, y_pred, average="macro")
 
+    print("Evaluation week:", eval_week)
+    print("Evaluation files:")
+    for path in eval_paths:
+        print(" -", path)
     print("Evaluation samples:", len(eval_features))
+    if eval_sample_limit is not None:
+        print("Total evaluation rows before sampling:", total_eval_rows)
     print("Accuracy:", round(float(accuracy), 4))
     print("Macro F1:", round(float(macro_f1), 4))
     print("Classification report (top 10 classes by support):")
