@@ -18,8 +18,11 @@ sudo apt install -y ubuntu-drivers-common
 echo "Installing CUDA toolkit..."
 sudo apt install -y nvidia-cuda-toolkit
 
-echo "Installing NVIDIA driver 580..."
-sudo apt install -y nvidia-driver-580
+# Run this command to list your GPU and the recommended driver
+# ubuntu-drivers devices
 
-echo "All installations complete. Rebooting system..."
-sudo reboot
+# echo "Installing NVIDIA driver 580..."
+# sudo apt install -y nvidia-driver-580
+
+# echo "All installations complete. Rebooting system..."
+# sudo reboot
