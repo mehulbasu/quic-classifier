@@ -100,3 +100,5 @@ youtube                   prec=0.598 rec=0.497 f1=0.543 support=44735
 google-fonts              prec=0.547 rec=0.714 f1=0.619 support=42650
 instagram                 prec=0.802 rec=0.844 f1=0.822 support=41964
 default-background        prec=0.425 rec=0.614 f1=0.503 support=37699
+
+------------------------On c4130 node (4x Tesla V100 16GB)------------------------

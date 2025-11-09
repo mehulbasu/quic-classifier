@@ -3,6 +3,9 @@
 # Exit immediately if a command exits with a non-zero status
 set -e
 
+git config --global user.name "Mehul Basu"
+git config --global user.email "mehulbasu@gmail.com"
+
 echo "Updating package list..."
 sudo apt update -y
 
