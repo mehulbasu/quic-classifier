@@ -3,9 +3,9 @@ features/labels for modeling experiments.
 
 Update DATA_PATH before running this module.
 """
-import hashlib
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+import hashlib
+from typing import Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -301,14 +301,6 @@ def _cache_key(path: Path, feature_columns: List[str]) -> str:
     return f"{path.stem}_{digest}"
 
 
-def _week_cache_key(paths: Sequence[Path], feature_columns: List[str]) -> str:
-    normalized = sorted(str(Path(p)) for p in paths)
-    joined_paths = "||".join(normalized)
-    joined_features = ",".join(feature_columns)
-    digest = hashlib.sha1(f"{joined_paths}::{joined_features}".encode("utf-8")).hexdigest()[:12]
-    return digest
-
-
 def load_cached_training_matrices(
     path: Path,
     feature_columns: List[str],
@@ -363,54 +355,6 @@ def load_cached_features_with_labels(
         dump(labels, label_path)
 
     return features, labels
-
-
-def load_cached_week_features_with_labels(
-    paths: Sequence[Path],
-    feature_columns: List[str],
-    *,
-    cache_prefix: str,
-    use_cache: bool = True,
-) -> Tuple[pd.DataFrame, pd.Series]:
-    if not paths:
-        raise ValueError("No input paths provided for week loading.")
-
-    normalized_paths = [Path(p) for p in paths]
-    key = _week_cache_key(normalized_paths, feature_columns)
-    X_path = CACHE_DIR / f"{cache_prefix}_{key}_X.joblib"
-    label_path = CACHE_DIR / f"{cache_prefix}_{key}_labels.joblib"
-
-    if use_cache and X_path.exists() and label_path.exists():
-        return load(X_path), load(label_path)
-
-    feature_frames: List[pd.DataFrame] = []
-    label_frames: List[pd.Series] = []
-    for path in normalized_paths:
-        features, labels = load_cached_features_with_labels(
-            path,
-            feature_columns,
-            use_cache=use_cache,
-        )
-        feature_frames.append(features)
-        label_frames.append(labels)
-
-    combined_features = pd.concat(
-        feature_frames,
-        axis=0,
-        ignore_index=True,
-        copy=False,
-    )
-    combined_labels = pd.concat(
-        label_frames,
-        axis=0,
-        ignore_index=True,
-    )
-
-    if use_cache:
-        dump(combined_features, X_path)
-        dump(combined_labels, label_path)
-
-    return combined_features, combined_labels
 
 def main() -> None:
     df = load_day(DATA_PATH, RAW_INPUT_COLUMNS)

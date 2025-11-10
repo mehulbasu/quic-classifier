@@ -1,0 +1,23 @@
+name: 740-project
+
+channels:
+  - rapidsai
+  - nvidia
+  - conda-forge
+  - defaults
+
+dependencies:
+  - cudf=25.10
+  - cuml=25.10
+  - cuda-cudart
+  - cuda-version=12
+  - numpy
+  - pandas
+  - scikit-learn
+  - pyarrow
+  - joblib
+
+prefix: /mydata/conda-envs/740-project
+# conda env create -f environment.yml -p /mydata/conda-envs/740-project
+# conda activate /mydata/conda-envs/740-project
+# conda remove --name /mydata/conda-envs/740-project --all
