@@ -22,6 +22,7 @@ wget https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge
 # Installing Conda
 echo "Installing Miniforge..."
 bash Miniforge3-Linux-x86_64.sh -b -p $HOME/miniforge3
+export PATH="$HOME/miniforge3/bin:$PATH"
 
 # Remove installer
 rm Miniforge3-Linux-x86_64.sh
@@ -42,11 +43,11 @@ source ~/.bashrc
 echo "Installing Ubuntu drivers common package..."
 sudo apt install -y ubuntu-drivers-common
 
-# Run this command to list your GPU and the recommended driver
-# ubuntu-drivers devices
+Run this command to list your GPU and the recommended driver
+ubuntu-drivers devices
 
 # echo "Installing NVIDIA driver 580..."
 # sudo apt install -y nvidia-driver-580
 
-echo "All installations complete. Rebooting system..."
-sudo reboot
+# echo "All installations complete. Rebooting system..."
+# sudo reboot
