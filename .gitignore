@@ -10,3 +10,6 @@ venv/
 cesnet-quic22.zip
 datasets/
 .DS_Store
+
+output.txt
+cufile.log

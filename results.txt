@@ -102,6 +102,7 @@ instagram                 prec=0.802 rec=0.844 f1=0.822 support=41964
 default-background        prec=0.425 rec=0.614 f1=0.503 support=37699
 
 ------------------------On c4130 node (4x Tesla V100 16GB)------------------------
+FIRST STABLE XGBOOST RUN: 3 FILES
 Model parameters:
   tree_method=hist
   device=cuda
@@ -130,7 +131,7 @@ google-fonts              prec=0.606 rec=0.696 f1=0.648 support=356260
 instagram                 prec=0.850 rec=0.864 f1=0.857 support=325771
 spotify                   prec=0.749 rec=0.811 f1=0.779 support=299901
 
-
+RUN 2: 4 FILES
 Model parameters:
   tree_method=hist
   device=cuda
@@ -169,3 +170,87 @@ youtube                   prec=0.633 rec=0.578 f1=0.604 support=359861
 google-fonts              prec=0.615 rec=0.697 f1=0.654 support=356260
 instagram                 prec=0.852 rec=0.864 f1=0.858 support=325771
 spotify                   prec=0.754 rec=0.809 f1=0.781 support=299901
+
+RUN 3: SET MAX DEPTH TO 8, DECREASED MAX BIN TO 48
+Model parameters:
+  tree_method=hist
+  device=cuda
+  objective=multi:softprob
+  eval_metric=mlogloss
+  max_depth=8
+  max_bin=48
+  learning_rate=0.1
+  subsample=0.8
+  colsample_bytree=0.8
+  reg_lambda=1.0
+  seed=42
+  verbosity=2
+  n_estimators=300
+Using 4 GPU(s).
+Loaded training data: npartitions=35 total_rows=33110467 total_size=9.18GB rows/part[min=270524 max=1000000 mean=946013.3]
+Training feature matrix: npartitions=35 total_rows=33110467 total_size=8.51GB rows/part[min=270524 max=1000000 mean=946013.3]
+Training label vector: npartitions=35 total_rows=33110467 total_size=0.37GB rows/part[min=270524 max=1000000 mean=946013.3]
+Training samples: 33110467
+Unique classes: 105
+Repartitioned training feature matrix: npartitions=75 total_rows=33110467 total_size=8.51GB rows/part[min=98456 max=500000 mean=441472.9]
+Repartitioned training label vector: npartitions=75 total_rows=33110467 total_size=0.37GB rows/part[min=98456 max=500000 mean=441472.9]
+Training time (GPU): 1377.6s
+Saved model to datasets/cache/models/xgboost_quic.json
+Evaluation feature matrix: npartitions=8 total_rows=8046282 total_size=2.07GB rows/part[min=2000000 max=2046282 mean=2011570.5]
+Evaluation label vector: npartitions=8 total_rows=8046282 total_size=0.09GB rows/part[min=2000000 max=2046282 mean=2011570.5]
+Evaluation samples: 8046282
+Accuracy: 0.7002
+Macro F1: 0.6082
+Classification report (top 10 classes by support):
+google-www                prec=0.621 rec=0.622 f1=0.622 support=577603
+google-ads                prec=0.495 rec=0.580 f1=0.534 support=568974
+google-services           prec=0.840 rec=0.830 f1=0.835 support=486841
+google-play               prec=0.698 rec=0.777 f1=0.736 support=440465
+google-gstatic            prec=0.849 rec=0.747 f1=0.795 support=418454
+google-background         prec=0.509 rec=0.407 f1=0.452 support=360702
+youtube                   prec=0.647 rec=0.593 f1=0.619 support=359861
+google-fonts              prec=0.542 rec=0.680 f1=0.603 support=356260
+instagram                 prec=0.856 rec=0.865 f1=0.861 support=325771
+spotify                   prec=0.769 rec=0.819 f1=0.793 support=299901
+
+RUN 4: SET MAX DEPTH TO 7, MAX BIN 64, BEST XGBOOST RESULTS YET
+Model parameters:
+  tree_method=hist
+  device=cuda
+  objective=multi:softprob
+  eval_metric=mlogloss
+  max_depth=7
+  max_bin=64
+  learning_rate=0.1
+  subsample=0.8
+  colsample_bytree=0.8
+  reg_lambda=1.0
+  seed=42
+  verbosity=2
+  n_estimators=400
+Using 4 GPU(s).
+Loaded training data: npartitions=35 total_rows=33110467 total_size=9.18GB rows/part[min=270524 max=1000000 mean=946013.3]
+Training feature matrix: npartitions=35 total_rows=33110467 total_size=8.51GB rows/part[min=270524 max=1000000 mean=946013.3]
+Training label vector: npartitions=35 total_rows=33110467 total_size=0.37GB rows/part[min=270524 max=1000000 mean=946013.3]
+Training samples: 33110467
+Unique classes: 105
+Repartitioned training feature matrix: npartitions=75 total_rows=33110467 total_size=8.51GB rows/part[min=98456 max=500000 mean=441472.9]
+Repartitioned training label vector: npartitions=75 total_rows=33110467 total_size=0.37GB rows/part[min=98456 max=500000 mean=441472.9]
+Training time (GPU): 1670.1s
+Saved model to datasets/cache/models/xgboost_quic.json
+Evaluation feature matrix: npartitions=8 total_rows=8046282 total_size=2.07GB rows/part[min=2000000 max=2046282 mean=2011570.5]
+Evaluation label vector: npartitions=8 total_rows=8046282 total_size=0.09GB rows/part[min=2000000 max=2046282 mean=2011570.5]
+Evaluation samples: 8046282
+Accuracy: 0.7061
+Macro F1: 0.6147
+Classification report (top 10 classes by support):
+google-www                prec=0.649 rec=0.643 f1=0.646 support=577603
+google-ads                prec=0.498 rec=0.575 f1=0.534 support=568974
+google-services           prec=0.838 rec=0.832 f1=0.835 support=486841
+google-play               prec=0.696 rec=0.780 f1=0.736 support=440465
+google-gstatic            prec=0.854 rec=0.769 f1=0.809 support=418454
+google-background         prec=0.514 rec=0.409 f1=0.455 support=360702
+youtube                   prec=0.646 rec=0.592 f1=0.618 support=359861
+google-fonts              prec=0.573 rec=0.722 f1=0.639 support=356260
+instagram                 prec=0.856 rec=0.867 f1=0.861 support=325771
+spotify                   prec=0.764 rec=0.817 f1=0.790 support=299901

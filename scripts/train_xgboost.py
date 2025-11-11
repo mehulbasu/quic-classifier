@@ -369,7 +369,7 @@ def train_model(
     params: Dict[str, float | int | str],
     num_boost_round: int,
 ) -> xgb.Booster:
-    dtrain = DaskQuantileDMatrix(client, features, labels)
+    dtrain = DaskQuantileDMatrix(client, features, labels, max_bin=params.get("max_bin", 256))
     train_params = dict(params)
 
     start = perf_counter()
@@ -465,6 +465,7 @@ def main() -> None:
         "colsample_bytree": args.colsample_bytree,
         "reg_lambda": args.reg_lambda,
         "seed": RANDOM_STATE,
+        'verbosity': 2,
     }
     num_boost_round = args.n_estimators
 
