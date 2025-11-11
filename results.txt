@@ -129,3 +129,43 @@ youtube                   prec=0.634 rec=0.579 f1=0.605 support=359861
 google-fonts              prec=0.606 rec=0.696 f1=0.648 support=356260
 instagram                 prec=0.850 rec=0.864 f1=0.857 support=325771
 spotify                   prec=0.749 rec=0.811 f1=0.779 support=299901
+
+
+Model parameters:
+  tree_method=hist
+  device=cuda
+  objective=multi:softprob
+  eval_metric=mlogloss
+  max_depth=6
+  max_bin=256
+  learning_rate=0.1
+  subsample=0.8
+  colsample_bytree=0.8
+  reg_lambda=1.0
+  seed=42
+  n_estimators=400
+Using 4 GPU(s).
+Loaded training data: npartitions=35 total_rows=33110467 total_size=9.18GB rows/part[min=270524 max=1000000 mean=946013.3]
+Training feature matrix: npartitions=35 total_rows=33110467 total_size=8.51GB rows/part[min=270524 max=1000000 mean=946013.3]
+Training label vector: npartitions=35 total_rows=33110467 total_size=0.37GB rows/part[min=270524 max=1000000 mean=946013.3]
+Training samples: 33110467
+Unique classes: 105
+Repartitioned training feature matrix: npartitions=75 total_rows=33110467 total_size=8.51GB rows/part[min=98456 max=500000 mean=441472.9]
+Repartitioned training label vector: npartitions=75 total_rows=33110467 total_size=0.37GB rows/part[min=98456 max=500000 mean=441472.9]
+Training time (GPU): 1617.0s
+Evaluation feature matrix: npartitions=8 total_rows=8046282 total_size=2.07GB rows/part[min=2000000 max=2046282 mean=2011570.5]
+Evaluation label vector: npartitions=8 total_rows=8046282 total_size=0.09GB rows/part[min=2000000 max=2046282 mean=2011570.5]
+Evaluation samples: 8046282
+Accuracy: 0.704
+Macro F1: 0.6202
+Classification report (top 10 classes by support):
+google-www                prec=0.672 rec=0.658 f1=0.665 support=577603
+google-ads                prec=0.481 rec=0.587 f1=0.529 support=568974
+google-services           prec=0.830 rec=0.823 f1=0.827 support=486841
+google-play               prec=0.680 rec=0.769 f1=0.722 support=440465
+google-gstatic            prec=0.864 rec=0.767 f1=0.812 support=418454
+google-background         prec=0.502 rec=0.404 f1=0.448 support=360702
+youtube                   prec=0.633 rec=0.578 f1=0.604 support=359861
+google-fonts              prec=0.615 rec=0.697 f1=0.654 support=356260
+instagram                 prec=0.852 rec=0.864 f1=0.858 support=325771
+spotify                   prec=0.754 rec=0.809 f1=0.781 support=299901

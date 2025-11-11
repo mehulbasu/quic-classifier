@@ -6,6 +6,7 @@ forest trainer while scaling to datasets that exceed individual GPU memory.
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
 from time import perf_counter
 from typing import Dict, Iterable, Tuple
@@ -37,9 +38,13 @@ from scripts.load_day import (
 DEFAULT_TRAIN_ROOT = Path("datasets/training")
 DEFAULT_EVAL_PATH = Path("datasets/cesnet-quic22/W-2022-46/1_Mon/flows-20221114.parquet")
 DEFAULT_MODEL_PATH = Path("datasets/cache/models/xgboost_quic.json")
-DEFAULT_PARTITION_SIZE = "256MB"
+DEFAULT_N_PARTITIONS = 75
 DEFAULT_DEVICE_MEMORY_LIMIT = "14GB"
 RANDOM_STATE = 42
+
+# Suppress expected Dask worker heartbeat errors during shutdown
+logging.getLogger("distributed.worker").setLevel(logging.CRITICAL)
+logging.getLogger("distributed.comm").setLevel(logging.CRITICAL)
 
 
 def parse_args() -> argparse.Namespace:
@@ -71,10 +76,10 @@ def parse_args() -> argparse.Namespace:
         help="Number of GPUs to use (auto-detected if omitted).",
     )
     parser.add_argument(
-        "--partition-size",
-        type=str,
-        default=DEFAULT_PARTITION_SIZE,
-        help="Desired partition size for Dask repartition (default: %(default)s).",
+          "--npartitions",
+          type=int,
+          default=DEFAULT_N_PARTITIONS,
+          help="Desired number of partitions for Dask repartition (default: %(default)s)."
     )
     parser.add_argument(
         "--device-memory-limit",
@@ -150,15 +155,13 @@ def use_parquet_source(path: Path) -> str:
     raise FileNotFoundError(f"Unsupported training source: {path}")
 
 
-def load_dask_frame(source: Path, columns: Iterable[str], partition_size: str) -> dask_cudf.DataFrame:
+def load_dask_frame(source: Path, columns: Iterable[str]) -> dask_cudf.DataFrame:
     pattern = use_parquet_source(source)
     ddf = dask_cudf.read_parquet(
         pattern,
         columns=list(columns),
         aggregate_files=False,
     )
-    if partition_size:
-        ddf = ddf.repartition(partition_size=partition_size)
     return ddf
 
 
@@ -188,6 +191,22 @@ def summarize_partitions(ddf: dask_cudf.DataFrame, name: str) -> None:
         f"{name}: npartitions={ddf.npartitions} total_rows={total_rows} "
         f"total_size={total_bytes_gb:.2f}GB rows/part[min={rows_per_partition.min()} max={rows_per_partition.max()} mean={rows_per_partition.mean():.1f}]"
     )
+
+
+def repartition_features_labels(
+    features: dask_cudf.DataFrame,
+    labels: dask_cudf.Series,
+    npartitions: int | None,
+) -> Tuple[dask_cudf.DataFrame, dask_cudf.Series]:
+    if not npartitions:
+        return features, labels
+
+    combined = features.assign(__label__=labels)
+    combined = combined.repartition(npartitions=npartitions)
+    labels = combined["__label__"]
+    labels.name = "LABEL"
+    features = combined.drop(columns=["__label__"])
+    return features, labels
 
 def _engineer_partition(df: cudf.DataFrame) -> cudf.DataFrame:
     enriched = df.copy(deep=False)
@@ -300,33 +319,34 @@ def sample_limit_ddf(ddf: dask_cudf.DataFrame, limit: int | None) -> dask_cudf.D
     return ddf.sample(frac=fraction, random_state=RANDOM_STATE)
 
 
-def build_label_map(ddf: dask_cudf.DataFrame) -> Dict[str, int]:
-    unique_labels = ddf[TARGET_COLUMN].dropna().unique().compute()
-    label_list = sorted(unique_labels.to_pandas().tolist())
-    return {label: idx for idx, label in enumerate(label_list)}
-
-
-def encode_labels(ddf: dask_cudf.DataFrame, label_map: Dict[str, int]) -> Tuple[dask_cudf.DataFrame, Dict[int, str]]:
-    def map_partition(s: cudf.Series) -> cudf.Series:
-        return s.map(label_map)
-    
-    encoded = ddf[TARGET_COLUMN].map_partitions(map_partition, meta=(None, "int64"))
-    ddf["LABEL"] = encoded
-    ddf = ddf.dropna(subset=["LABEL"])
-    ddf["LABEL"] = ddf["LABEL"].astype("int32")
-    inverse = {idx: label for label, idx in label_map.items()}
-    return ddf, inverse
-
-
 def prepare_features_and_labels(
     ddf: dask_cudf.DataFrame,
-    label_map: Dict[str, int],
-) -> Tuple[dask_cudf.DataFrame, dask_cudf.Series]:
+    categories: cudf.Index | None = None,
+) -> Tuple[dask_cudf.DataFrame, dask_cudf.Series, cudf.Index]:
     engineered = engineer_features(ddf)
-    engineered, _ = encode_labels(engineered, label_map)
+    engineered = engineered.categorize(columns=[TARGET_COLUMN])
+
+    if categories is None:
+        categories = engineered._meta[TARGET_COLUMN].cat.categories
+    else:
+        categories = cudf.Index(categories)
+
+    def _set_categories(pdf: cudf.DataFrame) -> cudf.DataFrame:
+        pdf[TARGET_COLUMN] = pdf[TARGET_COLUMN].astype("category").cat.set_categories(categories)
+        return pdf
+
+    meta = engineered._meta.copy(deep=True)
+    meta[TARGET_COLUMN] = meta[TARGET_COLUMN].astype("category").cat.set_categories(categories)
+    engineered = engineered.map_partitions(_set_categories, meta=meta)
+
+    labels = engineered[TARGET_COLUMN].cat.codes.astype("int32")
+    valid_mask = labels != -1
+    labels = labels[valid_mask]
+
     features = engineered[FEATURE_COLUMNS].astype("float32")
-    labels = engineered["LABEL"].astype("int32")
-    return features, labels
+    features = features[valid_mask]
+
+    return features, labels, categories
 
 
 def compute_numpy(array_like) -> np.ndarray:
@@ -382,10 +402,12 @@ def evaluate_model(
 ) -> None:
     dtest = DaskQuantileDMatrix(client, features, labels)
     proba = xgb_dask_predict(client, booster, dtest)
+
     if proba.ndim != 2:
         raise ValueError(f"Expected 2D probability output, received ndim={proba.ndim}")
 
     class_axis = proba.shape[1]
+
     def _block_argmax(block: np.ndarray) -> np.ndarray:
         return block.argmax(axis=1).astype(np.int32)
 
@@ -459,22 +481,28 @@ def main() -> None:
         print(f"Using {num_gpus} GPU(s).")
 
         train_columns = list(RAW_INPUT_COLUMNS) + [TARGET_COLUMN]
-        train_ddf = load_dask_frame(args.train_root, train_columns, args.partition_size)
+        train_ddf = load_dask_frame(args.train_root, train_columns)
         train_ddf = sample_limit_ddf(train_ddf, args.sample_limit)
         summarize_partitions(train_ddf, "Loaded training data")
 
-        label_map = build_label_map(train_ddf)
-        inverse_labels = {idx: label for label, idx in label_map.items()}
-        num_classes = len(label_map)
+        train_features, train_labels, categories = prepare_features_and_labels(train_ddf)
+        categories_list = categories.to_pandas().tolist()
+        num_classes = len(categories_list)
         if num_classes <= 1:
             raise ValueError("Training data must contain at least two classes.")
         model_params["num_class"] = num_classes
+        inverse_labels = {idx: label for idx, label in enumerate(categories_list)}
 
-        train_features, train_labels = prepare_features_and_labels(train_ddf, label_map)
         summarize_partitions(train_features, "Training feature matrix")
-        summarize_partitions(train_labels.to_frame("LABEL"), "Training label vector")
+        summarize_partitions(train_labels.to_frame(name="LABEL"), "Training label vector")
         print(f"Training samples: {int(train_labels.count().compute())}")
         print(f"Unique classes: {num_classes}")
+
+        train_features, train_labels = repartition_features_labels(
+            train_features, train_labels, args.npartitions
+        )
+        summarize_partitions(train_features, "Repartitioned training feature matrix")
+        summarize_partitions(train_labels.to_frame(name="LABEL"), "Repartitioned training label vector")
 
         output_model_path = args.output_model
         output_model_path.parent.mkdir(parents=True, exist_ok=True)
@@ -486,16 +514,23 @@ def main() -> None:
         del train_features, train_labels, train_ddf
 
         eval_columns = list(RAW_INPUT_COLUMNS) + [TARGET_COLUMN]
-        eval_ddf = load_dask_frame(args.eval_path, eval_columns, args.partition_size)
-        eval_features, eval_labels = prepare_features_and_labels(eval_ddf, label_map)
+        eval_ddf = load_dask_frame(args.eval_path, eval_columns)
+        eval_features, eval_labels, _ = prepare_features_and_labels(eval_ddf, categories)
         summarize_partitions(eval_features, "Evaluation feature matrix")
-        summarize_partitions(eval_labels.to_frame("LABEL"), "Evaluation label vector")
+        summarize_partitions(eval_labels.to_frame(name="LABEL"), "Evaluation label vector")
 
         evaluate_model(client, booster, eval_features, eval_labels, inverse_labels, num_classes)
 
     finally:
-        client.close()
-        cluster.close()
+        # Ensure graceful shutdown with proper ordering
+        try:
+            client.close()
+        except Exception:
+            pass
+        try:
+            cluster.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
