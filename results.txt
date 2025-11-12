@@ -299,3 +299,48 @@ youtube                   prec=0.671 rec=0.614 f1=0.641 support=359861
 google-fonts              prec=0.611 rec=0.723 f1=0.662 support=356260
 instagram                 prec=0.863 rec=0.875 f1=0.869 support=325771
 spotify                   prec=0.779 rec=0.834 f1=0.806 support=299901
+
+RUN 6: Increased max_depth to 12 and max_bin to 150. Reduced training set to 2 files.
+Set npartitions to 18 (same size as initial partitions) to avoid repartitions.
+Best XGBoost results yet.
+Model parameters:
+  tree_method=hist
+  device=cuda
+  objective=multi:softprob
+  eval_metric=mlogloss
+  max_depth=12
+  max_bin=150
+  learning_rate=0.1
+  subsample=0.8
+  colsample_bytree=0.8
+  reg_lambda=1.0
+  seed=42
+  verbosity=2
+  n_estimators=400
+Using 4 GPU(s).
+Loaded training data: npartitions=18 total_rows=16886336 total_size=4.68GB rows/part[min=270524 max=1000000 mean=938129.8]
+Training feature matrix: npartitions=18 total_rows=16886336 total_size=4.34GB rows/part[min=270524 max=1000000 mean=938129.8]
+Training label vector: npartitions=18 total_rows=16886336 total_size=0.19GB rows/part[min=270524 max=1000000 mean=938129.8]
+Training samples: 16886336
+Unique classes: 105
+Repartitioned training feature matrix: npartitions=18 total_rows=16886336 total_size=4.34GB rows/part[min=270524 max=1000000 mean=938129.8]
+Repartitioned training label vector: npartitions=18 total_rows=16886336 total_size=0.19GB rows/part[min=270524 max=1000000 mean=938129.8]
+Training time (GPU): 1770.6s
+Saved model to datasets/cache/models/xgboost_quic.json
+Evaluation feature matrix: npartitions=8 total_rows=8046282 total_size=2.07GB rows/part[min=2000000 max=2046282 mean=2011570.5]
+Evaluation label vector: npartitions=8 total_rows=8046282 total_size=0.09GB rows/part[min=2000000 max=2046282 mean=2011570.5]
+Evaluation samples: 8046282
+Accuracy: 0.7542
+Macro F1: 0.6446
+Classification report (top 10 classes by support):
+google-www                prec=0.722 rec=0.734 f1=0.728 support=577603
+google-ads                prec=0.573 rec=0.662 f1=0.614 support=568974
+google-services           prec=0.874 rec=0.864 f1=0.869 support=486841
+google-play               prec=0.752 rec=0.820 f1=0.784 support=440465
+google-gstatic            prec=0.874 rec=0.798 f1=0.834 support=418454
+google-background         prec=0.592 rec=0.524 f1=0.556 support=360702
+youtube                   prec=0.709 rec=0.661 f1=0.684 support=359861
+google-fonts              prec=0.650 rec=0.729 f1=0.687 support=356260
+instagram                 prec=0.877 rec=0.885 f1=0.881 support=325771
+spotify                   prec=0.815 rec=0.858 f1=0.836 support=299901
+
