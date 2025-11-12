@@ -3,6 +3,9 @@
 This script mirrors the experimentation patterns used in the RAPIDS random
 forest trainer while scaling to datasets that exceed individual GPU memory.
 """
+# TODO: Latest advice from Gemini for hyperparameter tuning
+# TODO: Repartitioning seems to mess up the load balancing across GPUs.
+# TODO: Why/how is data being partitioned in the initial read_parquet step?
 from __future__ import annotations
 
 import argparse
