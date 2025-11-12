@@ -24,3 +24,21 @@ Partition management was another major lever. Initially we repartitioned the raw
 Recent large-scale benchmarks (see `results.txt`) show the evolution: the first stable 400-round run reached 0.7026 accuracy / 0.6147 macro-F1 in ~27 min; tuning depth/bin parameters produced up to 0.7061 accuracy / 0.6147 macro-F1 on the 8 M-flow holdout. Training logs also confirm the balanced partitions (~441k rows each after repartitioning 4 files) and consistent evaluation throughput.
 
 Finally, we hardened shutdown by suppressing benign Dask heartbeat errors and guarding the client/cluster teardown, so long runs exit cleanly after writing the booster to `datasets/cache/models/xgboost_quic.json`.
+
+## 11/11
+
+Conducted a systematic hyperparameter tuning campaign to push accuracy beyond the initial 70% baseline. The key insight was that the relationship between tree depth, histogram bins, and dataset size is critical for capturing the 105-class structure without overfitting or hitting memory limits.
+
+**Run 5** increased `max_depth` to 8 and `max_bin` to 105 (matching the number of classes), then reduced the training set to 3 files (25.4M rows, ~6.53 GB engineered). This configuration reached **0.7252 accuracy / 0.6321 macro-F1** on the 8M-flow holdout, a meaningful jump from the ~0.70 baseline. The training time was ~28.5 min.
+
+**Run 6** pushed deeper with `max_depth=12, max_bin=150` on only 2 files (16.9M rows). By setting `npartitions=18` to match the raw partition count (eliminating repartitioning), the pipeline avoided shuffle overhead. This yielded **0.7542 accuracy / 0.6446 macro-F1**—a 2.5% boost over Run 5. Critically, the logs show that without explicit repartition, the 18 partitions stayed ~938K rows each (4.34 GB total), keeping per-worker memory pressure low.
+
+**Run 7** added the 3rd training file back (25.4M rows) while keeping `max_depth=12, max_bin=150, npartitions=27` (again matching raw layout). The results improved further to **0.7584 accuracy / 0.6553 macro-F1**, showing that more training data and deeper trees continue to help. The tradeoff is training time (~37 min)—longer than Run 6 but still well-managed by the quantile matrix streaming.
+
+**Why the improvements?** Histogram-based splits with higher bin counts capture finer feature interactions in the QUIC flow space (ratios, balances, packet densities). Deeper trees (depth 12 vs 6) create room for nuanced decision boundaries across the 105 application classes. The key operational change—avoiding repartition operations when the raw partitions already match `npartitions`—eliminated unnecessary reshuffling and kept partitions compact, allowing the GPU workers to process more data per iteration without VRAM swaps.
+
+**Top-10 class performance in Run 7:** Google-www (F1=0.737), Google-services (F1=0.871), Instagram (F1=0.884), Spotify (F1=0.837), and Google-play (F1=0.787) all exceed F1 ≥ 0.73. Even challenging classes like Google-background improved to F1=0.562 (up from 0.488 in Run 5). This suggests the model is learning robust flow signatures across the dataset.
+
+The 75.84% accuracy on a massively imbalanced 105-class problem demonstrates that scaling tree depth and histogram resolution in tandem with careful partition planning yields meaningful gains without architectural redesign.
+
+## 11/12

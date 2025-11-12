@@ -6,6 +6,7 @@ forest trainer while scaling to datasets that exceed individual GPU memory.
 # TODO: Latest advice from Gemini for hyperparameter tuning
 # TODO: Repartitioning seems to mess up the load balancing across GPUs.
 # TODO: Why/how is data being partitioned in the initial read_parquet step?
+# TODO: Calculate provider-level accuracy during testing (predictions among flows from the same provider).
 from __future__ import annotations
 
 import argparse
