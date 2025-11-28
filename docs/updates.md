@@ -41,4 +41,8 @@ Conducted a systematic hyperparameter tuning campaign to push accuracy beyond th
 
 The 75.84% accuracy on a massively imbalanced 105-class problem demonstrates that scaling tree depth and histogram resolution in tandem with careful partition planning yields meaningful gains without architectural redesign.
 
-## 11/12
+## 11/27
+**CNN Training Pipeline**
+- Added train_pytorch.py, a self-contained CESNET-QUIC22 trainer that builds cached numpy tensors from the parquet files (pyarrow-based), applies per-channel/feature normalization, and encodes handshake strings via GPU-friendly hashing so every DDP rank shares the same mem-mapped dataset.
+- Implemented the HybridCNN model with a 1D CNN sequence branch, histogram/stats MLP branch, and SNI/User-Agent/QUIC-version embeddings plus weighted CrossEntropy (optional), macro-F1 tracking, AMP (toggle with `--no-amp`), and full NCCL DDP support.
+- Wired robust CLI knobs for data splits (`--val-files` / `--val-split`), cache invalidation (`--rebuild-cache`), loader behavior, optimizer/scheduler (warmup + cosine), and checkpointing so the 4×V100 node can reach >80 % accuracy while scaling efficiently.
