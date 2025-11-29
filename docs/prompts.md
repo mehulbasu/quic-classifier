@@ -60,6 +60,8 @@ Now we will fix some bottlenecks to speed up our training time and use less GPU 
 1. In `main()`, we have the line `label_map = build_label_map(train_ddf)`. This function calls `.unique().compute()` which forces Dask to load and scan all input files from disk just to get a list of unique application names. Then, the script has to load and scan all input files again to do the actual training. You are effectively reading the entire dataset twice. One option could be to use Dask's built-in categorical conversion inside the `prepare_features_and_labels` function, but make sure this will be compatible with the rest of the script. Otherwise go for a different alternative.
 2. You call load_dask_frame with `partition_size="256MB"`. This splits your raw, un-engineered data into 256MB chunks. You then call `prepare_features_and_labels`, which calls `engineer_features`. The `_engineer_partition` function is a partition exploder. It takes a 256MB partition and inflates it by creating dozens of new features (especially from the histograms). A 256MB raw partition can easily become 5-10GB in memory after engineering. When a GPU worker tries to process this single, massive partition, it runs out of memory. You must repartition after engineering, not before. This ensures your final partitions (the ones XGBoost actually trains on) are balanced and memory-limited.
 
+---
+
 Act as a Senior Machine Learning Engineer specializing in Network Traffic Analysis. I need you to write a complete, standalone PyTorch training pipeline for the CESNET-QUIC22 dataset. The goal is to classify encrypted QUIC traffic with >80% accuracy, improving upon a previous XGBoost baseline.
 Hardware Context:
 - System: Single node with 4x NVIDIA V100 GPUs (16GB VRAM), 32 CPU cores, and 128GB RAM.
@@ -91,3 +93,48 @@ CustomDataset class.
 HybridCNN model class.
 train_one_epoch and evaluate functions.
 Main execution block handling the DDP spawning (using torch.multiprocessing).
+
+
+Refactor the current `train_pytorch.py` script to solve a critical RAM exhaustion (OOM/SIGKILL) issue during DistributedDataParallel (DDP) training.
+**The Problem:**
+Currently, the script attempts to load the entire dataset (25M rows) into memory or memory-maps it all at once. With 4 GPUs and multiple workers, this explodes system RAM and causes the OS to kill the process.
+**The Solution:**
+Refactor the training loop to implement **"Sequential Chunk Training"**. The system must never hold more than *one* Parquet file's worth of data in RAM at a time.
+**Implementation Requirements:**
+1.  **Parallel Pre-processing (Caching):**
+    * Keep the `ProcessPoolExecutor` logic.
+    * Convert each source `.parquet` file into a corresponding `.pt` (PyTorch tensor) file on disk. Call these "chunks".
+    * Ensure this happens *before* `mp.spawn` is called.
+2.  **Dataset Class (`SingleChunkDataset`):**
+    * Delete the old `QUICDataset` that loaded everything.
+    * Create a new class `SingleChunkDataset(file_path)` that loads **only one specific .pt file** into memory (CPU).
+3.  **Refactored `main_worker` (The Training Loop):**
+    * Instead of creating one giant DataLoader, write a nested loop:
+        ```python
+        for epoch in range(epochs):
+            # Shuffle the order of files/chunks for randomness
+            random.shuffle(chunk_files)
+            
+            for chunk_file in chunk_files:
+                # 1. Load ONLY this chunk
+                dataset = SingleChunkDataset(chunk_file)
+                
+                # 2. Create DDP Sampler & Loader for this specific chunk
+                sampler = DistributedSampler(dataset, ...)
+                loader = DataLoader(dataset, num_workers=2, ...) # Low workers is fine now
+                
+                # 3. Train on this chunk
+                train_one_epoch(...) 
+                
+                # 4. CRITICAL: Cleanup to free RAM before next chunk
+                del dataset, loader, sampler
+                gc.collect()
+        ```
+    * The model and optimizer state must persist across chunks.
+4.  **DDP Stability Fixes:**
+    * In `dist.barrier()`, you MUST pass `device_ids=[rank]` to prevent the "devices used by this process are currently unknown" warning/hang.
+    * Ensure `dist.destroy_process_group()` is called at the very end.
+5.  **Model Architecture:**
+    * Preserve the existing `HybridCNN` (1D CNN + MLP) exactly as is.
+
+Generate the complete, runnable Python script.

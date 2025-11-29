@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Distributed PyTorch training pipeline for the CESNET-QUIC22 dataset."""
+"""Distributed PyTorch trainer with sequential chunk loading for CESNET-QUIC22."""
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import json
 import math
 import os
 import random
+import shutil
 import time
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -22,19 +25,16 @@ from torch import amp, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
-# -----------------------------------------------------------------------------
-# Utility helpers
-# -----------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Hybrid CNN trainer for CESNET-QUIC22")
+    parser = argparse.ArgumentParser(description="Hybrid CNN trainer for CESNET-QUIC22 (chunked)")
     parser.add_argument("--data-dir", type=str, default="datasets/training", help="Directory with parquet files")
     parser.add_argument("--output-dir", type=str, default="artifacts/cnn_ddp", help="Directory for checkpoints")
-    parser.add_argument("--cache-dir", type=str, default="datasets/cache_pytorch", help="On-disk cache for processed tensors")
+    parser.add_argument("--cache-dir", type=str, default="datasets/cache_pytorch", help="Cache root for processed chunks")
     parser.add_argument("--epochs", type=int, default=25)
     parser.add_argument("--batch-size", type=int, default=2048)
     parser.add_argument("--val-batch-size", type=int, default=2048)
-    parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument("--num-workers", type=int, default=4, help="DataLoader workers per GPU")
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--warmup-epochs", type=int, default=2)
@@ -44,8 +44,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-split", type=float, default=0.1, help="Fraction of files for validation if --val-files not set")
     parser.add_argument("--train-files", type=str, nargs="*", default=None, help="Optional subset of parquet files for training")
     parser.add_argument("--val-files", type=str, nargs="*", default=None, help="Optional subset of parquet files for validation")
-    parser.add_argument("--rebuild-cache", action="store_true", help="Force regeneration of cached tensors")
+    parser.add_argument("--rebuild-cache", action="store_true", help="Force regeneration of cached chunks")
     parser.add_argument("--cache-batch-rows", type=int, default=65536, help="Rows per batch when parsing parquet for cache")
+    parser.add_argument("--cache-workers", type=int, default=7, help="Parallel workers for cache building (max 10)")
     parser.add_argument("--sni-hash-size", type=int, default=65536)
     parser.add_argument("--ua-hash-size", type=int, default=16384)
     parser.add_argument("--sni-embed-dim", type=int, default=64)
@@ -115,10 +116,7 @@ def build_caches_if_needed(args: argparse.Namespace, is_primary: bool) -> Tuple[
 
     if is_primary:
         if need_train or need_val:
-            print(
-                f"Preparing caches (train files={len(train_files)}, val files={len(val_files)})",
-                flush=True,
-            )
+            print(f"Preparing caches (train files={len(train_files)}, val files={len(val_files)})", flush=True)
             label_map: Dict[str, int]
             version_values: Sequence[int]
             normalization: Optional[Dict[str, List[float]]] = None
@@ -161,11 +159,6 @@ def build_caches_if_needed(args: argparse.Namespace, is_primary: bool) -> Tuple[
 
     setattr(args, "has_val_split", bool(val_files))
     return train_files, val_files
-
-
-# -----------------------------------------------------------------------------
-# Dataset preprocessing and caching
-# -----------------------------------------------------------------------------
 
 
 def resolve_file_lists(
@@ -229,9 +222,80 @@ def collect_label_and_version_info(files: Sequence[Path], batch_rows: int = 500_
     return label_map, version_list, label_counts
 
 
-class SplitCacheBuilder:
-    """Builds numpy caches from parquet files for a given split."""
+def parse_sequence_value(seq_value: Optional[str], seq_len: int) -> Tuple[np.ndarray, int]:
+    if not seq_value:
+        return np.zeros((3, seq_len), dtype=np.float32), 0
+    triplet = json.loads(seq_value)
+    ipt = _pad_sequence(triplet[0], seq_len)
+    ipt = np.log1p(np.maximum(ipt, 0.0))
+    direction = _pad_sequence(triplet[1], seq_len)
+    sizes = _pad_sequence(triplet[2], seq_len)
+    stacked = np.stack([ipt, direction, sizes], axis=0).astype(np.float32)
+    valid_len = min(len(triplet[0]), seq_len)
+    return stacked, valid_len
 
+
+def build_tabular_features_value(data: Dict[str, List], idx: int, seq_len: int) -> np.ndarray:
+    duration = float(data["DURATION"][idx] or 0.0)
+    bytes_fwd = float(data["BYTES"][idx] or 0.0)
+    bytes_rev = float(data["BYTES_REV"][idx] or 0.0)
+    packets_fwd = float(data["PACKETS"][idx] or 0.0)
+    packets_rev = float(data["PACKETS_REV"][idx] or 0.0)
+    ppi_len = float(data["PPI_LEN"][idx] or 0.0)
+    ppi_duration = float(data["PPI_DURATION"][idx] or 0.0)
+    ppi_roundtrips = float(data["PPI_ROUNDTRIPS"][idx] or 0.0)
+    flow_idle = 1.0 if data["FLOW_ENDREASON_IDLE"][idx] else 0.0
+    flow_active = 1.0 if data["FLOW_ENDREASON_ACTIVE"][idx] else 0.0
+    flow_other = 1.0 if data["FLOW_ENDREASON_OTHER"][idx] else 0.0
+    protocol = float(data["PROTOCOL"][idx] or 0.0)
+    dst_asn = float(data["DST_ASN"][idx] or 0.0)
+    src_port = float(data["SRC_PORT"][idx] or 0.0)
+    dst_port = float(data["DST_PORT"][idx] or 0.0)
+
+    features = [
+        duration,
+        log1p_safe(bytes_fwd),
+        log1p_safe(bytes_rev),
+        log1p_safe(bytes_fwd + bytes_rev),
+        log1p_safe(packets_fwd),
+        log1p_safe(packets_rev),
+        log1p_safe(packets_fwd + packets_rev),
+        ppi_len / max(seq_len, 1),
+        ppi_duration,
+        ppi_roundtrips,
+        flow_idle,
+        flow_active,
+        flow_other,
+        protocol,
+        log1p_safe(dst_asn),
+        src_port / 65535.0,
+        dst_port / 65535.0,
+    ]
+
+    features.extend(_parse_histogram(data["PHIST_SRC_SIZES"][idx]))
+    features.extend(_parse_histogram(data["PHIST_DST_SIZES"][idx]))
+    features.extend(_parse_histogram(data["PHIST_SRC_IPT"][idx]))
+    features.extend(_parse_histogram(data["PHIST_DST_IPT"][idx]))
+    return np.array(features, dtype=np.float32)
+
+
+def _pad_sequence(values: Sequence[float], seq_len: int) -> np.ndarray:
+    arr = np.zeros(seq_len, dtype=np.float32)
+    if not values:
+        return arr
+    clipped = values[:seq_len]
+    arr[: len(clipped)] = np.array(clipped, dtype=np.float32)
+    return arr
+
+
+def _parse_histogram(value: Optional[str]) -> List[float]:
+    if not value:
+        return [0.0] * 8
+    parsed = json.loads(value)
+    return [log1p_safe(float(x)) for x in parsed[:8]]
+
+
+class SplitCacheBuilder:
     columns: Tuple[str, ...] = (
         "APP",
         "PPI",
@@ -271,10 +335,13 @@ class SplitCacheBuilder:
         sni_hash_size: int,
         ua_hash_size: int,
         batch_rows: int,
+        num_workers: int,
+        rebuild: bool,
     ) -> None:
         self.split = split
         self.files = list(files)
         self.cache_dir = cache_dir
+        self.chunk_dir = cache_dir / "chunks"
         self.seq_len = seq_len
         self.label_map = label_map
         self.version_map = {value: idx + 1 for idx, value in enumerate(version_values)}
@@ -282,89 +349,89 @@ class SplitCacheBuilder:
         self.sni_hash_size = sni_hash_size
         self.ua_hash_size = ua_hash_size
         self.batch_rows = batch_rows
-        self.tab_dim: Optional[int] = None
-        self._seq_sum = np.zeros(3, dtype=np.float64)
-        self._seq_sumsq = np.zeros(3, dtype=np.float64)
-        self._seq_counts = np.zeros(3, dtype=np.float64)
-        self._tab_sum: Optional[np.ndarray] = None
-        self._tab_sumsq: Optional[np.ndarray] = None
-        self.class_counts = np.zeros(len(label_map), dtype=np.int64)
-        self.processed_rows = 0
+        self.num_workers = max(1, min(num_workers, 10))
+        self.rebuild = rebuild
 
     def build(self) -> Dict[str, object]:
-        total_rows = self._count_rows()
-        if total_rows == 0:
-            raise ValueError(f"No rows found for split {self.split}")
+        if self.rebuild and self.cache_dir.exists():
+            shutil.rmtree(self.cache_dir)
+        self.chunk_dir.mkdir(parents=True, exist_ok=True)
+        tasks = []
+        for idx, path in enumerate(self.files):
+            chunk_name = f"chunk_{idx:05d}_{path.stem.replace(' ', '_')}.pt"
+            tasks.append(
+                {
+                    "parquet_path": str(path),
+                    "chunk_path": str(self.chunk_dir / chunk_name),
+                    "seq_len": self.seq_len,
+                    "label_map": self.label_map,
+                    "version_map": self.version_map,
+                    "sni_hash_size": self.sni_hash_size,
+                    "ua_hash_size": self.ua_hash_size,
+                    "batch_rows": self.batch_rows,
+                }
+            )
 
-        sequences = np.zeros((total_rows, 3, self.seq_len), dtype=np.float32)
-        tabular: Optional[np.ndarray] = None
-        sni_idx = np.zeros(total_rows, dtype=np.int32)
-        ua_idx = np.zeros(total_rows, dtype=np.int32)
-        version_idx = np.zeros(total_rows, dtype=np.int32)
-        labels = np.zeros(total_rows, dtype=np.int64)
+        results: List[Dict[str, object]] = []
+        with ProcessPoolExecutor(max_workers=min(len(tasks), self.num_workers)) as executor:
+            futures = [executor.submit(_cache_worker_entry, task) for task in tasks]
+            for future in as_completed(futures):
+                result = future.result()
+                results.append(result)
+                chunk_name = Path(result["chunk_path"]).name
+                print(
+                    f"[{self.split}] Wrote {result['num_rows']:,} samples to {chunk_name}",
+                    flush=True,
+                )
 
-        row_ptr = 0
-        t_start = time.perf_counter()
-        for path in self.files:
-            parquet_file = pq.ParquetFile(str(path))
-            for batch in parquet_file.iter_batches(columns=self.columns, batch_size=self.batch_rows):
-                data = batch.to_pydict()
-                batch_rows = len(data["APP"])
-                for local_idx in range(batch_rows):
-                    label_name = data["APP"][local_idx]
-                    if label_name is None or label_name not in self.label_map:
-                        continue
+        results.sort(key=lambda item: item["chunk_path"])
+        chunk_entries = []
+        total_rows = 0
+        tab_dim = None
+        class_counts = np.zeros(len(self.label_map), dtype=np.int64)
+        seq_sum = np.zeros(3, dtype=np.float64)
+        seq_sumsq = np.zeros(3, dtype=np.float64)
+        seq_counts = np.zeros(3, dtype=np.float64)
+        tab_sum: Optional[np.ndarray] = None
+        tab_sumsq: Optional[np.ndarray] = None
 
-                    seq_tensor, valid_len = self._parse_sequence(data["PPI"][local_idx])
-                    if self.normalization is None and valid_len > 0:
-                        self._seq_sum += seq_tensor[:, :valid_len].sum(axis=1)
-                        self._seq_sumsq += (seq_tensor[:, :valid_len] ** 2).sum(axis=1)
-                        self._seq_counts += valid_len
-                    elif self.normalization is not None:
-                        seq_tensor = self._apply_seq_norm(seq_tensor)
-                    sequences[row_ptr] = seq_tensor
+        for item in results:
+            num_rows = int(item["num_rows"])
+            if num_rows == 0:
+                chunk_path = Path(item["chunk_path"])
+                if chunk_path.exists():
+                    chunk_path.unlink()
+                continue
+            chunk_entries.append({"file": Path(item["chunk_path"]).name, "num_samples": num_rows})
+            total_rows += num_rows
+            class_counts += np.array(item["class_counts"], dtype=np.int64)
+            if tab_dim is None and int(item["tab_dim"]) > 0:
+                tab_dim = int(item["tab_dim"])
+            if self.normalization is None:
+                seq_sum += np.array(item["seq_sum"], dtype=np.float64)
+                seq_sumsq += np.array(item["seq_sumsq"], dtype=np.float64)
+                seq_counts += np.array(item["seq_counts"], dtype=np.float64)
+                tab_array = np.array(item["tab_sum"], dtype=np.float64)
+                tab_sq_array = np.array(item["tab_sumsq"], dtype=np.float64)
+                tab_sum = tab_array if tab_sum is None else tab_sum + tab_array
+                tab_sumsq = tab_sq_array if tab_sumsq is None else tab_sumsq + tab_sq_array
 
-                    tab_vec = self._build_tabular_features(data, local_idx)
-                    if self.tab_dim is None:
-                        self.tab_dim = len(tab_vec)
-                        tabular = np.zeros((total_rows, self.tab_dim), dtype=np.float32)
-                        self._tab_sum = np.zeros(self.tab_dim, dtype=np.float64)
-                        self._tab_sumsq = np.zeros(self.tab_dim, dtype=np.float64)
-                    assert tabular is not None
-                    if self.normalization is None:
-                        self._tab_sum += tab_vec
-                        self._tab_sumsq += tab_vec ** 2
-                    else:
-                        tab_vec = self._apply_tab_norm(tab_vec)
-                    tabular[row_ptr] = tab_vec
+        if not chunk_entries:
+            raise ValueError(f"No usable samples found for split {self.split}")
 
-                    sni_idx[row_ptr] = stable_hash(data["QUIC_SNI"][local_idx], self.sni_hash_size)
-                    ua_idx[row_ptr] = stable_hash(data["QUIC_USERAGENT"][local_idx], self.ua_hash_size)
-                    version_value = data["QUIC_VERSION"][local_idx]
-                    version_idx[row_ptr] = self.version_map.get(int(version_value), 0) if version_value is not None else 0
-
-                    label_id = self.label_map[label_name]
-                    labels[row_ptr] = label_id
-                    self.class_counts[label_id] += 1
-
-                    row_ptr += 1
-                    if row_ptr % 500_000 == 0:
-                        elapsed = time.perf_counter() - t_start
-                        print(f"[{self.split}] Cached {row_ptr:,} rows in {elapsed:.1f}s", flush=True)
-
-        sequences = sequences[:row_ptr]
-        tabular = tabular[:row_ptr] if tabular is not None else np.zeros((row_ptr, 1), dtype=np.float32)
-        sni_idx = sni_idx[:row_ptr]
-        ua_idx = ua_idx[:row_ptr]
-        version_idx = version_idx[:row_ptr]
-        labels = labels[:row_ptr]
-        self.processed_rows = row_ptr
+        if tab_dim is None:
+            tab_dim = 0
 
         if self.normalization is None:
-            seq_mean, seq_std = self._finalize_seq_stats()
-            tab_mean, tab_std = self._finalize_tab_stats()
-            sequences = self._normalize_sequences_array(sequences, seq_mean, seq_std)
-            tabular = self._normalize_tabular_array(tabular, tab_mean, tab_std)
+            seq_counts = np.maximum(seq_counts, 1.0)
+            seq_mean = (seq_sum / seq_counts).astype(np.float32)
+            seq_var = np.clip(seq_sumsq / seq_counts - seq_mean ** 2, 1e-6, None)
+            seq_std = np.sqrt(seq_var).astype(np.float32)
+            sample_count = max(total_rows, 1)
+            assert tab_sum is not None and tab_sumsq is not None
+            tab_mean = (tab_sum / sample_count).astype(np.float32)
+            tab_var = np.clip(tab_sumsq / sample_count - tab_mean ** 2, 1e-6, None)
+            tab_std = np.sqrt(tab_var).astype(np.float32)
             normalization = {
                 "seq_mean": seq_mean.tolist(),
                 "seq_std": seq_std.tolist(),
@@ -376,201 +443,130 @@ class SplitCacheBuilder:
 
         meta = {
             "split": self.split,
-            "num_samples": int(row_ptr),
+            "num_samples": int(total_rows),
             "seq_len": self.seq_len,
-            "tab_dim": int(tabular.shape[1]),
+            "tab_dim": int(tab_dim),
             "num_classes": len(self.label_map),
             "label_to_index": self.label_map,
             "index_to_label": sorted(self.label_map, key=self.label_map.get),
             "version_values": list(self.version_map.keys()),
-            "class_counts": self.class_counts[: len(self.label_map)].tolist(),
+            "class_counts": class_counts.tolist(),
             "normalization": normalization,
             "sni_hash_size": self.sni_hash_size,
             "ua_hash_size": self.ua_hash_size,
-            "schema_version": 1,
+            "chunks": chunk_entries,
+            "schema_version": 2,
         }
 
-        self._save_arrays(sequences, tabular, sni_idx, ua_idx, version_idx, labels)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
         with open(self.cache_dir / "meta.json", "w", encoding="utf-8") as handle:
             json.dump(meta, handle, indent=2)
         return meta
 
-    def _save_arrays(
-        self,
-        sequences: np.ndarray,
-        tabular: np.ndarray,
-        sni_idx: np.ndarray,
-        ua_idx: np.ndarray,
-        version_idx: np.ndarray,
-        labels: np.ndarray,
-    ) -> None:
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        np.save(self.cache_dir / "sequences.npy", sequences.astype(np.float32))
-        np.save(self.cache_dir / "tabular.npy", tabular.astype(np.float32))
-        np.save(self.cache_dir / "sni_idx.npy", sni_idx.astype(np.int32))
-        np.save(self.cache_dir / "ua_idx.npy", ua_idx.astype(np.int32))
-        np.save(self.cache_dir / "version_idx.npy", version_idx.astype(np.int32))
-        np.save(self.cache_dir / "labels.npy", labels.astype(np.int64))
 
-    def _count_rows(self) -> int:
-        total = 0
-        for path in self.files:
-            parquet_file = pq.ParquetFile(str(path))
-            total += parquet_file.metadata.num_rows
-        return total
+def _cache_worker_entry(config: Dict[str, object]) -> Dict[str, object]:
+    parquet_path = Path(config["parquet_path"])
+    chunk_path = Path(config["chunk_path"])
+    seq_len = int(config["seq_len"])
+    label_map: Dict[str, int] = config["label_map"]
+    version_map: Dict[int, int] = config["version_map"]
+    sni_hash_size = int(config["sni_hash_size"])
+    ua_hash_size = int(config["ua_hash_size"])
+    batch_rows = int(config["batch_rows"])
 
-    def _parse_sequence(self, seq_value: Optional[str]) -> Tuple[np.ndarray, int]:
-        if not seq_value:
-            return np.zeros((3, self.seq_len), dtype=np.float32), 0
-        triplet = json.loads(seq_value)
-        ipt = self._pad_sequence(triplet[0])
-        ipt = np.log1p(np.maximum(ipt, 0.0))
-        direction = self._pad_sequence(triplet[1])
-        sizes = self._pad_sequence(triplet[2])
-        stacked = np.stack([ipt, direction, sizes], axis=0).astype(np.float32)
-        valid_len = min(len(triplet[0]), self.seq_len)
-        return stacked, valid_len
+    parquet_file = pq.ParquetFile(str(parquet_path))
+    total_rows = parquet_file.metadata.num_rows
+    total_rows = max(int(total_rows), 1)
+    sequences = np.zeros((total_rows, 3, seq_len), dtype=np.float32)
+    tabular: Optional[np.ndarray] = None
+    sni_idx = np.zeros(total_rows, dtype=np.int32)
+    ua_idx = np.zeros(total_rows, dtype=np.int32)
+    version_idx = np.zeros(total_rows, dtype=np.int32)
+    labels = np.zeros(total_rows, dtype=np.int64)
 
-    def _pad_sequence(self, values: Sequence[float]) -> np.ndarray:
-        arr = np.zeros(self.seq_len, dtype=np.float32)
-        if not values:
-            return arr
-        clipped = values[: self.seq_len]
-        arr[: len(clipped)] = np.array(clipped, dtype=np.float32)
-        return arr
+    seq_sum = np.zeros(3, dtype=np.float64)
+    seq_sumsq = np.zeros(3, dtype=np.float64)
+    seq_counts = np.zeros(3, dtype=np.float64)
+    tab_sum: Optional[np.ndarray] = None
+    tab_sumsq: Optional[np.ndarray] = None
+    class_counts = np.zeros(len(label_map), dtype=np.int64)
+    tab_dim = 0
 
-    def _build_tabular_features(self, data: Dict[str, List], idx: int) -> np.ndarray:
-        duration = float(data["DURATION"][idx] or 0.0)
-        bytes_fwd = float(data["BYTES"][idx] or 0.0)
-        bytes_rev = float(data["BYTES_REV"][idx] or 0.0)
-        packets_fwd = float(data["PACKETS"][idx] or 0.0)
-        packets_rev = float(data["PACKETS_REV"][idx] or 0.0)
-        ppi_len = float(data["PPI_LEN"][idx] or 0.0)
-        ppi_duration = float(data["PPI_DURATION"][idx] or 0.0)
-        ppi_roundtrips = float(data["PPI_ROUNDTRIPS"][idx] or 0.0)
-        flow_idle = 1.0 if data["FLOW_ENDREASON_IDLE"][idx] else 0.0
-        flow_active = 1.0 if data["FLOW_ENDREASON_ACTIVE"][idx] else 0.0
-        flow_other = 1.0 if data["FLOW_ENDREASON_OTHER"][idx] else 0.0
-        protocol = float(data["PROTOCOL"][idx] or 0.0)
-        dst_asn = float(data["DST_ASN"][idx] or 0.0)
-        src_port = float(data["SRC_PORT"][idx] or 0.0)
-        dst_port = float(data["DST_PORT"][idx] or 0.0)
+    row_ptr = 0
+    for batch in parquet_file.iter_batches(columns=SplitCacheBuilder.columns, batch_size=batch_rows):
+        data = batch.to_pydict()
+        batch_rows_local = len(data["APP"])
+        for local_idx in range(batch_rows_local):
+            label_name = data["APP"][local_idx]
+            if label_name is None or label_name not in label_map:
+                continue
 
-        features = [
-            duration,
-            log1p_safe(bytes_fwd),
-            log1p_safe(bytes_rev),
-            log1p_safe(bytes_fwd + bytes_rev),
-            log1p_safe(packets_fwd),
-            log1p_safe(packets_rev),
-            log1p_safe(packets_fwd + packets_rev),
-            ppi_len / max(self.seq_len, 1),
-            ppi_duration,
-            ppi_roundtrips,
-            flow_idle,
-            flow_active,
-            flow_other,
-            protocol,
-            log1p_safe(dst_asn),
-            src_port / 65535.0,
-            dst_port / 65535.0,
-        ]
+            seq_tensor, valid_len = parse_sequence_value(data["PPI"][local_idx], seq_len)
+            if valid_len > 0:
+                seq_sum += seq_tensor[:, :valid_len].sum(axis=1)
+                seq_sumsq += (seq_tensor[:, :valid_len] ** 2).sum(axis=1)
+                seq_counts += valid_len
+            sequences[row_ptr] = seq_tensor
 
-        features.extend(self._parse_histogram(data["PHIST_SRC_SIZES"][idx]))
-        features.extend(self._parse_histogram(data["PHIST_DST_SIZES"][idx]))
-        features.extend(self._parse_histogram(data["PHIST_SRC_IPT"][idx]))
-        features.extend(self._parse_histogram(data["PHIST_DST_IPT"][idx]))
-        return np.array(features, dtype=np.float32)
+            tab_vec = build_tabular_features_value(data, local_idx, seq_len)
+            if tabular is None:
+                tab_dim = len(tab_vec)
+                tabular = np.zeros((total_rows, tab_dim), dtype=np.float32)
+                tab_sum = np.zeros(tab_dim, dtype=np.float64)
+                tab_sumsq = np.zeros(tab_dim, dtype=np.float64)
+            assert tabular is not None and tab_sum is not None and tab_sumsq is not None
+            tabular[row_ptr] = tab_vec
+            tab_sum += tab_vec
+            tab_sumsq += tab_vec ** 2
 
-    def _parse_histogram(self, value: Optional[str]) -> List[float]:
-        if not value:
-            return [0.0] * 8
-        parsed = json.loads(value)
-        return [log1p_safe(float(x)) for x in parsed[:8]]
+            sni_idx[row_ptr] = stable_hash(data["QUIC_SNI"][local_idx], sni_hash_size)
+            ua_idx[row_ptr] = stable_hash(data["QUIC_USERAGENT"][local_idx], ua_hash_size)
+            version_value = data["QUIC_VERSION"][local_idx]
+            version_idx[row_ptr] = version_map.get(int(version_value), 0) if version_value is not None else 0
 
-    def _apply_seq_norm(self, seq: np.ndarray) -> np.ndarray:
-        assert self.normalization is not None
-        seq_mean = np.array(self.normalization["seq_mean"], dtype=np.float32)
-        seq_std = np.array(self.normalization["seq_std"], dtype=np.float32)
-        seq_std = np.where(seq_std == 0.0, 1.0, seq_std)
-        return (seq - seq_mean[:, None]) / seq_std[:, None]
+            label_id = label_map[label_name]
+            labels[row_ptr] = label_id
+            class_counts[label_id] += 1
+            row_ptr += 1
 
-    def _apply_tab_norm(self, tab: np.ndarray) -> np.ndarray:
-        assert self.normalization is not None
-        tab_mean = np.array(self.normalization["tab_mean"], dtype=np.float32)
-        tab_std = np.array(self.normalization["tab_std"], dtype=np.float32)
-        tab_std = np.where(tab_std == 0.0, 1.0, tab_std)
-        return (tab - tab_mean) / tab_std
+    sequences = np.ascontiguousarray(sequences[:row_ptr])
+    if tabular is None:
+        tab_dim = 0
+        tabular = np.zeros((row_ptr, 1), dtype=np.float32)
+        tab_sum = np.zeros(1, dtype=np.float64)
+        tab_sumsq = np.zeros(1, dtype=np.float64)
+    else:
+        tabular = np.ascontiguousarray(tabular[:row_ptr])
+    sni_idx = np.ascontiguousarray(sni_idx[:row_ptr])
+    ua_idx = np.ascontiguousarray(ua_idx[:row_ptr])
+    version_idx = np.ascontiguousarray(version_idx[:row_ptr])
+    labels = np.ascontiguousarray(labels[:row_ptr])
 
-    def _finalize_seq_stats(self) -> Tuple[np.ndarray, np.ndarray]:
-        counts = np.maximum(self._seq_counts, 1.0)
-        mean = self._seq_sum / counts
-        var = self._seq_sumsq / counts - mean ** 2
-        std = np.sqrt(np.clip(var, 1e-6, None))
-        return mean.astype(np.float32), std.astype(np.float32)
-
-    def _finalize_tab_stats(self) -> Tuple[np.ndarray, np.ndarray]:
-        assert self._tab_sum is not None and self._tab_sumsq is not None
-        sample_count = max(self.processed_rows, 1)
-        mean = self._tab_sum / sample_count
-        var = self._tab_sumsq / sample_count - mean ** 2
-        std = np.sqrt(np.clip(var, 1e-6, None))
-        return mean.astype(np.float32), std.astype(np.float32)
-
-    def _normalize_sequences_array(self, arr: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
-        std = np.where(std == 0.0, 1.0, std)
-        mean = mean.reshape(1, -1, 1)
-        std = std.reshape(1, -1, 1)
-        arr -= mean
-        arr /= std
-        return arr
-
-    def _normalize_tabular_array(self, arr: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
-        std = np.where(std == 0.0, 1.0, std)
-        mean = mean.reshape(1, -1)
-        std = std.reshape(1, -1)
-        arr -= mean
-        arr /= std
-        return arr
-
-
-class CesnetQuicDataset(Dataset):
-    """Memory-mapped dataset backed by cached numpy arrays."""
-
-    def __init__(self, cache_root: Path, split: str) -> None:
-        self.split_dir = cache_root / split
-        if not self.split_dir.exists():
-            raise FileNotFoundError(f"Cache directory missing for split {split}: {self.split_dir}")
-        with open(self.split_dir / "meta.json", "r", encoding="utf-8") as handle:
-            self.meta = json.load(handle)
-        self.sequences = np.load(self.split_dir / "sequences.npy", mmap_mode="r")
-        self.tabular = np.load(self.split_dir / "tabular.npy", mmap_mode="r")
-        self.sni_idx = np.load(self.split_dir / "sni_idx.npy", mmap_mode="r")
-        self.ua_idx = np.load(self.split_dir / "ua_idx.npy", mmap_mode="r")
-        self.version_idx = np.load(self.split_dir / "version_idx.npy", mmap_mode="r")
-        self.labels = np.load(self.split_dir / "labels.npy", mmap_mode="r")
-        self.length = int(self.meta["num_samples"])
-
-    def __len__(self) -> int:
-        return self.length
-
-    @property
-    def num_classes(self) -> int:
-        return int(self.meta["num_classes"])
-
-    @property
-    def num_versions(self) -> int:
-        return len(self.meta["version_values"])
-
-    def __getitem__(self, index: int) -> Dict[str, np.ndarray]:
-        return {
-            "sequences": np.array(self.sequences[index], copy=True),
-            "tabular": np.array(self.tabular[index], copy=True),
-            "sni_idx": int(self.sni_idx[index]),
-            "ua_idx": int(self.ua_idx[index]),
-            "version_idx": int(self.version_idx[index]),
-            "label": int(self.labels[index]),
+    if row_ptr > 0:
+        payload = {
+            "sequences": torch.from_numpy(sequences.copy()),
+            "tabular": torch.from_numpy(tabular.copy()),
+            "sni_idx": torch.from_numpy(sni_idx.copy()),
+            "ua_idx": torch.from_numpy(ua_idx.copy()),
+            "version_idx": torch.from_numpy(version_idx.copy()),
+            "labels": torch.from_numpy(labels.copy()),
         }
+        torch.save(payload, chunk_path)
+    else:
+        if chunk_path.exists():
+            chunk_path.unlink()
+
+    return {
+        "chunk_path": str(chunk_path),
+        "num_rows": int(row_ptr),
+        "tab_dim": int(tab_dim),
+        "seq_sum": seq_sum.tolist(),
+        "seq_sumsq": seq_sumsq.tolist(),
+        "seq_counts": seq_counts.tolist(),
+        "tab_sum": (tab_sum.tolist() if tab_sum is not None else [0.0]),
+        "tab_sumsq": (tab_sumsq.tolist() if tab_sumsq is not None else [0.0]),
+        "class_counts": class_counts.tolist(),
+    }
 
 
 def prepare_split_cache(
@@ -598,13 +594,114 @@ def prepare_split_cache(
         sni_hash_size=args.sni_hash_size,
         ua_hash_size=args.ua_hash_size,
         batch_rows=args.cache_batch_rows,
+        num_workers=args.cache_workers,
+        rebuild=rebuild,
     )
     return builder.build()
 
 
-# -----------------------------------------------------------------------------
-# Model definition
-# -----------------------------------------------------------------------------
+class ChunkManifest:
+    def __init__(self, cache_root: Path, split: str) -> None:
+        self.split = split
+        self.split_dir = cache_root / split
+        meta_path = self.split_dir / "meta.json"
+        if not meta_path.exists():
+            raise FileNotFoundError(f"Missing cache metadata for split {split}: {meta_path}")
+        with open(meta_path, "r", encoding="utf-8") as handle:
+            self.meta = json.load(handle)
+        self.chunk_dir = self.split_dir / "chunks"
+        if not self.chunk_dir.exists():
+            raise FileNotFoundError(f"Missing chunk directory for split {split}: {self.chunk_dir}")
+        self.chunks: List[Dict[str, object]] = list(self.meta.get("chunks", []))
+        if not self.chunks:
+            raise ValueError(f"No chunks registered for split {split}")
+
+    @property
+    def normalization(self) -> Dict[str, List[float]]:
+        norm = self.meta.get("normalization")
+        if norm is None:
+            raise ValueError(f"Normalization stats missing for split {self.split}")
+        return norm
+
+    @property
+    def seq_len(self) -> int:
+        return int(self.meta["seq_len"])
+
+    @property
+    def tab_dim(self) -> int:
+        return int(self.meta["tab_dim"])
+
+    @property
+    def num_classes(self) -> int:
+        return int(self.meta["num_classes"])
+
+    @property
+    def num_versions(self) -> int:
+        return len(self.meta.get("version_values", []))
+
+    @property
+    def class_counts(self) -> Sequence[int]:
+        return self.meta.get("class_counts", [])
+
+    @property
+    def num_chunks(self) -> int:
+        return len(self.chunks)
+
+    def chunk_path(self, index: int) -> Path:
+        entry = self.chunks[index]
+        chunk_file = entry.get("file")
+        if not chunk_file:
+            raise ValueError(f"Chunk entry at index {index} missing file field")
+        path = self.chunk_dir / str(chunk_file)
+        if not path.exists():
+            raise FileNotFoundError(f"Expected chunk file missing: {path}")
+        return path
+
+    def chunk_size(self, index: int) -> int:
+        entry = self.chunks[index]
+        return int(entry.get("num_samples", 0))
+
+
+class SingleChunkDataset(Dataset):
+    def __init__(self, chunk_path: Path, normalization: Dict[str, List[float]]) -> None:
+        if not chunk_path.exists():
+            raise FileNotFoundError(f"Chunk tensor missing: {chunk_path}")
+        payload = torch.load(chunk_path, map_location="cpu")
+        self.sequences: torch.Tensor = payload["sequences"].float()
+        self.tabular: torch.Tensor = payload["tabular"].float()
+        self.sni_idx: torch.Tensor = payload["sni_idx"].long()
+        self.ua_idx: torch.Tensor = payload["ua_idx"].long()
+        self.version_idx: torch.Tensor = payload["version_idx"].long()
+        self.labels: torch.Tensor = payload["labels"].long()
+
+        seq_mean = torch.tensor(normalization["seq_mean"], dtype=torch.float32).view(1, -1, 1)
+        seq_std = torch.tensor(normalization["seq_std"], dtype=torch.float32).clamp_min_(1e-6).view(1, -1, 1)
+        seq_mean = seq_mean.to(self.sequences.device)
+        seq_std = seq_std.to(self.sequences.device)
+        self.sequences.sub_(seq_mean).div_(seq_std)
+
+        tab_mean = torch.tensor(normalization["tab_mean"], dtype=torch.float32).view(1, -1)
+        tab_std = torch.tensor(normalization["tab_std"], dtype=torch.float32).clamp_min_(1e-6).view(1, -1)
+        tab_mean = tab_mean.to(self.tabular.device)
+        tab_std = tab_std.to(self.tabular.device)
+        self.tabular.sub_(tab_mean).div_(tab_std)
+
+        self.length = self.labels.shape[0]
+        if self.length == 0:
+            raise ValueError(f"Chunk {chunk_path} has no usable samples")
+
+    def __len__(self) -> int:
+        return self.length
+
+    def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
+        return {
+            "sequences": self.sequences[index],
+            "tabular": self.tabular[index],
+            "sni_idx": self.sni_idx[index],
+            "ua_idx": self.ua_idx[index],
+            "version_idx": self.version_idx[index],
+            "label": self.labels[index],
+        }
 
 
 class HybridCNN(nn.Module):
@@ -675,103 +772,81 @@ class HybridCNN(nn.Module):
         return self.head(fused)
 
 
-# -----------------------------------------------------------------------------
-# Training helpers
-# -----------------------------------------------------------------------------
+def broadcast_chunk_order(num_chunks: int, epoch: int, shuffle: bool, seed: int, rank: int) -> List[int]:
+    if num_chunks == 0:
+        return []
+    order: Optional[List[int]] = None
+    if not dist.is_initialized() or dist.get_world_size() == 1:
+        order = list(range(num_chunks))
+        if shuffle:
+            rng = random.Random(seed + epoch)
+            rng.shuffle(order)
+        return order
+
+    if rank == 0:
+        order = list(range(num_chunks))
+        if shuffle:
+            rng = random.Random(seed + epoch)
+            rng.shuffle(order)
+    obj_list: List[Optional[List[int]]] = [order]
+    dist.broadcast_object_list(obj_list, src=0)
+    received = obj_list[0]
+    if received is None:
+        raise RuntimeError("Failed to broadcast chunk order")
+    return received
 
 
-def create_dataloaders(
+def ddp_barrier(rank: int) -> None:
+    if dist.is_initialized():
+        if torch.cuda.is_available():
+            dist.barrier(device_ids=[torch.cuda.current_device()])
+        else:
+            dist.barrier()
+
+
+def release_cuda_cache() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def create_chunk_loader(
+    manifest: ChunkManifest,
+    chunk_idx: int,
     args: argparse.Namespace,
     rank: int,
     world_size: int,
-    has_val: bool,
-) -> Tuple[CesnetQuicDataset, DataLoader, Optional[DataLoader], DistributedSampler, Optional[DistributedSampler]]:
-    cache_root = Path(args.cache_dir)
-    train_dataset = CesnetQuicDataset(cache_root, "train")
-    val_dataset = CesnetQuicDataset(cache_root, "val") if has_val else None
-
-    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=False)
-    val_sampler = (
-        DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False, drop_last=False)
-        if val_dataset is not None
-        else None
-    )
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        sampler=train_sampler,
-        num_workers=args.num_workers,
+    is_train: bool,
+    epoch: int,
+) -> Tuple[SingleChunkDataset, DataLoader, DistributedSampler]:
+    chunk_path = manifest.chunk_path(chunk_idx)
+    dataset = SingleChunkDataset(chunk_path, manifest.normalization)
+    batch_size = args.batch_size if is_train else args.val_batch_size
+    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=is_train, drop_last=False)
+    sampler.set_epoch(epoch * 10 + chunk_idx if is_train else 0)
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        num_workers=0,
         pin_memory=True,
         drop_last=False,
-        persistent_workers=args.num_workers > 0,
     )
-    val_loader = (
-        DataLoader(
-            val_dataset,
-            batch_size=args.val_batch_size,
-            sampler=val_sampler,
-            num_workers=max(1, args.num_workers // 2),
-            pin_memory=True,
-            drop_last=False,
-            persistent_workers=args.num_workers > 0,
-        )
-        if val_dataset is not None
-        else None
-    )
-    return train_dataset, train_loader, val_loader, train_sampler, val_sampler
+    return dataset, loader, sampler
 
 
-def prepare_model(
-    args: argparse.Namespace,
-    device: torch.device,
-    num_classes: int,
-    num_versions: int,
-    tab_dim: int,
-) -> nn.Module:
-    model = HybridCNN(
-        seq_len=args.max_seq_len,
-        tab_dim=tab_dim,
-        num_classes=num_classes,
-        num_versions=num_versions,
-        args=args,
-    )
-    model.to(device)
-    return model
-
-
-def load_checkpoint(
-    path: str,
-    model: nn.Module,
-    optimizer: Optional[torch.optim.Optimizer],
-    scaler: Optional[amp.GradScaler],
-    device: torch.device,
-) -> Tuple[int, float]:
-    checkpoint = torch.load(path, map_location=device)
-    model.load_state_dict(checkpoint["model"])
-    if optimizer and "optimizer" in checkpoint:
-        optimizer.load_state_dict(checkpoint["optimizer"])
-    if scaler and "scaler" in checkpoint:
-        scaler.load_state_dict(checkpoint["scaler"])
-    start_epoch = checkpoint.get("epoch", 0)
-    best_acc = checkpoint.get("best_acc", 0.0)
-    return start_epoch, best_acc
-
-
-def train_one_epoch(
-    model: nn.Module,
+def train_single_chunk(
+    model: DDP,
     loader: DataLoader,
-    sampler: DistributedSampler,
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
     scaler: amp.GradScaler,
     device: torch.device,
-    epoch: int,
     args: argparse.Namespace,
     rank: int,
-) -> Dict[str, float]:
+    epoch: int,
+    chunk_idx: int,
+) -> Tuple[float, int, int]:
     model.train()
-    sampler.set_epoch(epoch)
     total_loss = 0.0
     total_correct = 0
     total_samples = 0
@@ -780,10 +855,10 @@ def train_one_epoch(
     for step, batch in enumerate(loader):
         sequences = batch["sequences"].to(device, non_blocking=True)
         tabular = batch["tabular"].to(device, non_blocking=True)
-        sni_idx = batch["sni_idx"].to(device, non_blocking=True).long()
-        ua_idx = batch["ua_idx"].to(device, non_blocking=True).long()
-        version_idx = batch["version_idx"].to(device, non_blocking=True).long()
-        targets = batch["label"].to(device, non_blocking=True).long()
+        sni_idx = batch["sni_idx"].to(device, non_blocking=True)
+        ua_idx = batch["ua_idx"].to(device, non_blocking=True)
+        version_idx = batch["version_idx"].to(device, non_blocking=True)
+        targets = batch["label"].to(device, non_blocking=True)
 
         with amp.autocast("cuda", dtype=autocast_dtype, enabled=args.use_amp):
             logits = model(sequences, tabular, sni_idx, ua_idx, version_idx)
@@ -806,19 +881,104 @@ def train_one_epoch(
         if rank == 0 and step % args.log_interval == 0:
             avg_loss = total_loss / max(total_samples, 1)
             avg_acc = total_correct / max(total_samples, 1)
-            print(f"Epoch {epoch} Step {step}: loss={avg_loss:.4f} acc={avg_acc:.4f}", flush=True)
+            print(
+                f"Epoch {epoch} Chunk {chunk_idx} Step {step}: loss={avg_loss:.4f} acc={avg_acc:.4f}",
+                flush=True,
+            )
 
-    metrics = torch.tensor([total_loss, total_correct, total_samples], device=device)
+    return total_loss, total_correct, total_samples
+
+
+def train_epoch(
+    model: DDP,
+    manifest: ChunkManifest,
+    criterion: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scaler: amp.GradScaler,
+    device: torch.device,
+    args: argparse.Namespace,
+    rank: int,
+    world_size: int,
+    epoch: int,
+) -> Dict[str, float]:
+    chunk_order = broadcast_chunk_order(manifest.num_chunks, epoch, shuffle=True, seed=args.seed, rank=rank)
+    loss_sum = 0.0
+    correct_sum = 0
+    sample_sum = 0
+    for chunk_idx in chunk_order:
+        ddp_barrier(rank)
+        dataset, loader, _ = create_chunk_loader(manifest, chunk_idx, args, rank, world_size, True, epoch)
+        chunk_loss, chunk_correct, chunk_samples = train_single_chunk(
+            model,
+            loader,
+            criterion,
+            optimizer,
+            scaler,
+            device,
+            args,
+            rank,
+            epoch,
+            chunk_idx,
+        )
+        loss_sum += chunk_loss
+        correct_sum += chunk_correct
+        sample_sum += chunk_samples
+        del dataset, loader
+        gc.collect()
+        release_cuda_cache()
+        ddp_barrier(rank)
+
+    metrics = torch.tensor([loss_sum, correct_sum, sample_sum], device=device)
     if dist.is_initialized():
         dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
+    if metrics[2].item() == 0:
+        raise ValueError("No training samples were processed; check chunk cache contents")
     avg_loss = (metrics[0] / metrics[2]).item()
     avg_acc = (metrics[1] / metrics[2]).item()
     return {"loss": avg_loss, "acc": avg_acc}
 
 
+def evaluate_single_chunk(
+    model: DDP,
+    loader: DataLoader,
+    criterion: nn.Module,
+    device: torch.device,
+    args: argparse.Namespace,
+) -> Tuple[float, int, int, List[torch.Tensor], List[torch.Tensor]]:
+    model.eval()
+    total_loss = 0.0
+    total_correct = 0
+    total_samples = 0
+    preds_all: List[torch.Tensor] = []
+    targets_all: List[torch.Tensor] = []
+    autocast_dtype = torch.float16 if args.amp_dtype == "fp16" else torch.bfloat16
+
+    with torch.no_grad():
+        for batch in loader:
+            sequences = batch["sequences"].to(device, non_blocking=True)
+            tabular = batch["tabular"].to(device, non_blocking=True)
+            sni_idx = batch["sni_idx"].to(device, non_blocking=True)
+            ua_idx = batch["ua_idx"].to(device, non_blocking=True)
+            version_idx = batch["version_idx"].to(device, non_blocking=True)
+            targets = batch["label"].to(device, non_blocking=True)
+            with amp.autocast("cuda", dtype=autocast_dtype, enabled=args.use_amp):
+                logits = model(sequences, tabular, sni_idx, ua_idx, version_idx)
+                loss = criterion(logits, targets)
+            batch_size = targets.size(0)
+            total_loss += loss.item() * batch_size
+            preds = logits.argmax(dim=1)
+            total_correct += preds.eq(targets).sum().item()
+            total_samples += batch_size
+            preds_all.append(preds.cpu())
+            targets_all.append(targets.cpu())
+
+    return total_loss, total_correct, total_samples, preds_all, targets_all
+
+
 def gather_predictions(preds: torch.Tensor, targets: torch.Tensor) -> Tuple[np.ndarray, np.ndarray]:
-    preds_list: List[Optional[List[int]]] = [None for _ in range(dist.get_world_size())]
-    targets_list: List[Optional[List[int]]] = [None for _ in range(dist.get_world_size())]
+    world_size = dist.get_world_size()
+    preds_list: List[Optional[List[int]]] = [None for _ in range(world_size)]
+    targets_list: List[Optional[List[int]]] = [None for _ in range(world_size)]
     dist.all_gather_object(preds_list, preds.tolist())
     dist.all_gather_object(targets_list, targets.tolist())
     flat_preds = np.array([item for sublist in preds_list if sublist for item in sublist], dtype=np.int64)
@@ -840,62 +1000,58 @@ def compute_macro_f1(preds: np.ndarray, targets: np.ndarray, num_classes: int) -
     return float(np.mean(f1_scores))
 
 
-def evaluate(
-    model: nn.Module,
-    loader: Optional[DataLoader],
-    sampler: Optional[DistributedSampler],
+def evaluate_split(
+    model: DDP,
+    manifest: Optional[ChunkManifest],
     criterion: nn.Module,
     device: torch.device,
     args: argparse.Namespace,
     rank: int,
-    num_classes: int,
+    world_size: int,
 ) -> Optional[Dict[str, float]]:
-    if loader is None or sampler is None:
+    if manifest is None:
         return None
-    model.eval()
-    sampler.set_epoch(0)
-    total_loss = 0.0
-    total_correct = 0
-    total_samples = 0
+    chunk_order = broadcast_chunk_order(manifest.num_chunks, 0, shuffle=False, seed=0, rank=rank)
+    loss_sum = 0.0
+    correct_sum = 0
+    sample_sum = 0
     preds_all: List[torch.Tensor] = []
     targets_all: List[torch.Tensor] = []
-    autocast_dtype = torch.float16 if args.amp_dtype == "fp16" else torch.bfloat16
 
-    with torch.no_grad():
-        for batch in loader:
-            sequences = batch["sequences"].to(device, non_blocking=True)
-            tabular = batch["tabular"].to(device, non_blocking=True)
-            sni_idx = batch["sni_idx"].to(device, non_blocking=True).long()
-            ua_idx = batch["ua_idx"].to(device, non_blocking=True).long()
-            version_idx = batch["version_idx"].to(device, non_blocking=True).long()
-            targets = batch["label"].to(device, non_blocking=True).long()
-            with amp.autocast("cuda", dtype=autocast_dtype, enabled=args.use_amp):
-                logits = model(sequences, tabular, sni_idx, ua_idx, version_idx)
-                loss = criterion(logits, targets)
-            batch_size = targets.size(0)
-            total_loss += loss.item() * batch_size
-            preds = logits.argmax(dim=1)
-            total_correct += preds.eq(targets).sum().item()
-            total_samples += batch_size
-            preds_all.append(preds.cpu())
-            targets_all.append(targets.cpu())
+    for chunk_idx in chunk_order:
+        ddp_barrier(rank)
+        dataset, loader, _ = create_chunk_loader(manifest, chunk_idx, args, rank, world_size, False, epoch=0)
+        chunk_loss, chunk_correct, chunk_samples, preds_chunk, targets_chunk = evaluate_single_chunk(
+            model, loader, criterion, device, args
+        )
+        loss_sum += chunk_loss
+        correct_sum += chunk_correct
+        sample_sum += chunk_samples
+        preds_all.extend(preds_chunk)
+        targets_all.extend(targets_chunk)
+        del dataset, loader
+        gc.collect()
+        release_cuda_cache()
+        ddp_barrier(rank)
 
-    metrics = torch.tensor([total_loss, total_correct, total_samples], device=device)
+    metrics = torch.tensor([loss_sum, correct_sum, sample_sum], device=device)
     if dist.is_initialized():
         dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
+    if metrics[2].item() == 0:
+        return None
     avg_loss = (metrics[0] / metrics[2]).item()
     avg_acc = (metrics[1] / metrics[2]).item()
 
     macro_f1 = None
     preds_tensor = torch.cat(preds_all) if preds_all else torch.empty(0, dtype=torch.int64)
     targets_tensor = torch.cat(targets_all) if targets_all else torch.empty(0, dtype=torch.int64)
-    if dist.is_initialized():
+    if dist.is_initialized() and dist.get_world_size() > 1:
         gathered_preds, gathered_targets = gather_predictions(preds_tensor, targets_tensor)
         if rank == 0 and gathered_preds.size > 0:
-            macro_f1 = compute_macro_f1(gathered_preds, gathered_targets, num_classes)
+            macro_f1 = compute_macro_f1(gathered_preds, gathered_targets, manifest.num_classes)
     else:
         if preds_tensor.numel() > 0:
-            macro_f1 = compute_macro_f1(preds_tensor.numpy(), targets_tensor.numpy(), num_classes)
+            macro_f1 = compute_macro_f1(preds_tensor.numpy(), targets_tensor.numpy(), manifest.num_classes)
 
     return {"loss": avg_loss, "acc": avg_acc, "macro_f1": macro_f1}
 
@@ -910,7 +1066,7 @@ def save_checkpoint(
     args: argparse.Namespace,
     tag: str,
 ) -> None:
-    if dist.get_rank() != 0:
+    if dist.is_initialized() and dist.get_rank() != 0:
         return
     state = {
         "epoch": epoch,
@@ -924,11 +1080,6 @@ def save_checkpoint(
     path = output_dir / f"checkpoint_{tag}.pt"
     torch.save(state, path)
     print(f"Saved checkpoint: {path}", flush=True)
-
-
-# -----------------------------------------------------------------------------
-# Distributed training entrypoint
-# -----------------------------------------------------------------------------
 
 
 def setup_process(rank: int, world_size: int, args: argparse.Namespace) -> None:
@@ -948,27 +1099,20 @@ def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
     setup_process(rank, world_size, args)
     set_seed(args.seed + rank)
     torch.backends.cudnn.benchmark = True
-
-    dist.barrier()
+    device = torch.device("cuda", rank)
+    ddp_barrier(rank)
 
     cache_root = Path(args.cache_dir)
-    train_dataset = CesnetQuicDataset(cache_root, "train")
-    val_dataset_present = bool(getattr(args, "has_val_split", False))
-    _, train_loader, val_loader, train_sampler, val_sampler = create_dataloaders(
-        args=args,
-        rank=rank,
-        world_size=world_size,
-        has_val=val_dataset_present,
-    )
+    train_manifest = ChunkManifest(cache_root, "train")
+    val_manifest = ChunkManifest(cache_root, "val") if getattr(args, "has_val_split", False) else None
 
-    device = torch.device("cuda", rank)
-    model = prepare_model(
+    model = HybridCNN(
+        seq_len=train_manifest.seq_len,
+        tab_dim=train_manifest.tab_dim,
+        num_classes=train_manifest.num_classes,
+        num_versions=train_manifest.num_versions,
         args=args,
-        device=device,
-        num_classes=train_dataset.num_classes,
-        num_versions=train_dataset.num_versions,
-        tab_dim=train_dataset.tabular.shape[1],
-    )
+    ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     scaler = amp.GradScaler("cuda", enabled=args.use_amp, init_scale=args.amp_loss_scale)
 
@@ -985,14 +1129,11 @@ def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(args.epochs, 1))
 
     class_weights = None
-    train_meta_path = cache_root / "train" / "meta.json"
-    with open(train_meta_path, "r", encoding="utf-8") as handle:
-        meta = json.load(handle)
-        if args.use_class_weights:
-            counts = np.array(meta["class_counts"], dtype=np.float32)
-            counts = np.where(counts == 0, 1.0, counts)
-            weights = counts.sum() / (len(counts) * counts)
-            class_weights = torch.tensor(weights, dtype=torch.float32, device=device)
+    if args.use_class_weights:
+        counts = np.array(train_manifest.class_counts, dtype=np.float32)
+        counts = np.where(counts == 0, 1.0, counts)
+        weights = counts.sum() / (len(counts) * counts)
+        class_weights = torch.tensor(weights, dtype=torch.float32, device=device)
 
     criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=args.label_smoothing).to(device)
     ddp_model = DDP(model, device_ids=[rank], output_device=rank, broadcast_buffers=False)
@@ -1002,13 +1143,17 @@ def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
     if args.resume:
         if rank == 0:
             print(f"Resuming from checkpoint {args.resume}", flush=True)
-        start_epoch, best_acc = load_checkpoint(args.resume, ddp_model.module, optimizer, scaler, device)
+        checkpoint = torch.load(args.resume, map_location=device)
+        ddp_model.module.load_state_dict(checkpoint["model"])
+        optimizer.load_state_dict(checkpoint.get("optimizer", optimizer.state_dict()))
+        scaler.load_state_dict(checkpoint.get("scaler", scaler.state_dict()))
+        start_epoch = checkpoint.get("epoch", 0)
+        best_acc = checkpoint.get("best_acc", 0.0)
 
     for epoch in range(start_epoch, args.epochs):
-        train_metrics = train_one_epoch(ddp_model, train_loader, train_sampler, criterion, optimizer, scaler, device, epoch, args, rank)
+        train_metrics = train_epoch(ddp_model, train_manifest, criterion, optimizer, scaler, device, args, rank, world_size, epoch)
         scheduler.step()
-
-        val_metrics = evaluate(ddp_model, val_loader, val_sampler, criterion, device, args, rank, train_dataset.num_classes)
+        val_metrics = evaluate_split(ddp_model, val_manifest, criterion, device, args, rank, world_size)
         if rank == 0:
             msg = f"Epoch {epoch} | train_loss={train_metrics['loss']:.4f} train_acc={train_metrics['acc']:.4f}"
             if val_metrics:
@@ -1024,6 +1169,7 @@ def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
         if args.save_every and (epoch + 1) % args.save_every == 0:
             save_checkpoint(Path(args.output_dir), epoch, ddp_model, optimizer, scaler, best_acc, args, tag=f"epoch{epoch+1}")
 
+    ddp_barrier(rank)
     cleanup_process()
 
 
@@ -1047,3 +1193,5 @@ def launch_training(args: argparse.Namespace) -> None:
 if __name__ == "__main__":
     cli_args = parse_args()
     launch_training(cli_args)
+
+
