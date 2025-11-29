@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Dict, List, Sequence
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -14,8 +15,9 @@ from sklearn.metrics import f1_score
 from torch.utils.data import DataLoader
 
 from scripts.train_pytorch import (
-    CesnetQuicDataset,
+    ChunkManifest,
     HybridCNN,
+    SingleChunkDataset,
     prepare_split_cache,
 )
 
@@ -29,18 +31,29 @@ def parse_args() -> argparse.Namespace:
         default="datasets/cache_pytorch",
         help="Directory containing cached tensors (same as training)",
     )
-    parser.add_argument(
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
         "--test-files",
         type=str,
         nargs="+",
-        required=True,
         help="List of parquet files (relative to --data-dir unless absolute) used for evaluation",
+    )
+    group.add_argument(
+        "--test-dir",
+        type=str,
+        help="Directory whose .parquet files (relative to --data-dir unless absolute) are evaluated",
     )
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to trained checkpoint")
     parser.add_argument("--split-name", type=str, default="test", help="Cache split name to use (default: test)")
     parser.add_argument("--batch-size", type=int, default=1024)
-    parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="DataLoader workers per chunk (0 avoids duplicating chunk tensors per worker)",
+    )
     parser.add_argument("--cache-batch-rows", type=int, default=65536)
+    parser.add_argument("--cache-workers", type=int, default=10, help="Parallel workers for cache building")
     parser.add_argument("--rebuild-cache", action="store_true")
     return parser.parse_args()
 
@@ -55,6 +68,20 @@ def resolve_files(data_dir: Path, files: Sequence[str]) -> List[Path]:
             raise FileNotFoundError(f"Missing parquet file: {path}")
         resolved.append(path)
     return resolved
+
+
+def resolve_directory(data_dir: Path, directory: str) -> List[Path]:
+    path = Path(directory)
+    if not path.is_absolute():
+        path = data_dir / path
+    if not path.exists():
+        raise FileNotFoundError(f"Test directory does not exist: {path}")
+    if not path.is_dir():
+        raise NotADirectoryError(f"Expected directory but got: {path}")
+    parquet_files = sorted(path.glob("*.parquet"))
+    if not parquet_files:
+        raise FileNotFoundError(f"No parquet files found under {path}")
+    return parquet_files
 
 
 def load_training_meta(cache_dir: Path) -> Dict:
@@ -86,61 +113,78 @@ def build_test_cache(
     )
 
 
-def load_model(checkpoint_path: Path, device: torch.device) -> tuple[HybridCNN, Dict]:
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    ckpt_args = checkpoint.get("args", {})
-    model = HybridCNN(
-        seq_len=ckpt_args["max_seq_len"],
-        tab_dim=ckpt_args["tab_dim"] if "tab_dim" in ckpt_args else checkpoint["model"]["head.0.weight"].shape[1],
-        num_classes=ckpt_args["num_classes"],
-        num_versions=ckpt_args.get("num_versions", 1),
-        args=SimpleNamespace(
-            seq_hidden=ckpt_args["seq_hidden"],
-            mlp_hidden=ckpt_args["mlp_hidden"],
-            dropout=ckpt_args["dropout"],
-            sni_embed_dim=ckpt_args["sni_embed_dim"],
-            ua_embed_dim=ckpt_args["ua_embed_dim"],
-            version_embed_dim=ckpt_args["version_embed_dim"],
-            sni_hash_size=ckpt_args["sni_hash_size"],
-            ua_hash_size=ckpt_args["ua_hash_size"],
-        ),
-    )
-    model.load_state_dict(checkpoint["model"])
-    model.to(device)
-    model.eval()
-    return model, ckpt_args
+def release_cuda_cache() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
-def evaluate(model: HybridCNN, loader: DataLoader, device: torch.device) -> tuple[np.ndarray, np.ndarray]:
+def evaluate_loader(model: HybridCNN, loader: DataLoader, device: torch.device) -> Tuple[np.ndarray, np.ndarray]:
     preds: List[np.ndarray] = []
     targets: List[np.ndarray] = []
     with torch.no_grad():
         for batch in loader:
-            sequences = torch.as_tensor(batch["sequences"], device=device)
-            tabular = torch.as_tensor(batch["tabular"], device=device)
-            sni_idx = torch.as_tensor(batch["sni_idx"], device=device).long()
-            ua_idx = torch.as_tensor(batch["ua_idx"], device=device).long()
-            version_idx = torch.as_tensor(batch["version_idx"], device=device).long()
-            labels = torch.as_tensor(batch["label"], device=device).long()
+            sequences = batch["sequences"].to(device, non_blocking=True)
+            tabular = batch["tabular"].to(device, non_blocking=True)
+            sni_idx = batch["sni_idx"].to(device, non_blocking=True).long()
+            ua_idx = batch["ua_idx"].to(device, non_blocking=True).long()
+            version_idx = batch["version_idx"].to(device, non_blocking=True).long()
+            labels = batch["label"].to(device, non_blocking=True).long()
             logits = model(sequences, tabular, sni_idx, ua_idx, version_idx)
             pred = logits.argmax(dim=1)
             preds.append(pred.cpu().numpy())
             targets.append(labels.cpu().numpy())
+    if not preds:
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64)
     return np.concatenate(preds), np.concatenate(targets)
+
+
+def evaluate_manifest(
+    model: HybridCNN,
+    manifest: ChunkManifest,
+    batch_size: int,
+    num_workers: int,
+    device: torch.device,
+) -> Tuple[np.ndarray, np.ndarray]:
+    preds_all: List[np.ndarray] = []
+    targets_all: List[np.ndarray] = []
+    for chunk_idx in range(manifest.num_chunks):
+        chunk_path = manifest.chunk_path(chunk_idx)
+        dataset = SingleChunkDataset(chunk_path, manifest.normalization)
+        loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+        )
+        chunk_preds, chunk_targets = evaluate_loader(model, loader, device)
+        if chunk_preds.size == 0:
+            continue
+        preds_all.append(chunk_preds)
+        targets_all.append(chunk_targets)
+        del dataset, loader
+        gc.collect()
+        release_cuda_cache()
+    if not preds_all:
+        raise ValueError(f"No samples found in split '{manifest.split}'")
+    return np.concatenate(preds_all), np.concatenate(targets_all)
 
 
 def main() -> None:
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    test_files = resolve_files(Path(args.data_dir), args.test_files)
+    data_dir = Path(args.data_dir)
+    if args.test_files:
+        test_files = resolve_files(data_dir, args.test_files)
+    else:
+        assert args.test_dir is not None
+        test_files = resolve_directory(data_dir, args.test_dir)
     cache_root = Path(args.cache_dir)
     train_meta = load_training_meta(cache_root)
     label_map = {k: int(v) for k, v in train_meta["label_to_index"].items()}
     version_values = train_meta.get("version_values", [])
     normalization = train_meta["normalization"]
-
-    ckpt_args = train_meta  # placeholder to capture dims from meta if needed
 
     cache_args = SimpleNamespace(
         cache_dir=str(args.cache_dir),
@@ -148,6 +192,7 @@ def main() -> None:
         sni_hash_size=train_meta["sni_hash_size"],
         ua_hash_size=train_meta["ua_hash_size"],
         cache_batch_rows=args.cache_batch_rows,
+        cache_workers=args.cache_workers,
     )
 
     build_test_cache(
@@ -160,17 +205,12 @@ def main() -> None:
         rebuild=args.rebuild_cache,
     )
 
-    dataset = CesnetQuicDataset(cache_root, args.split_name)
-    loader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=True,
-    )
+    manifest = ChunkManifest(cache_root, args.split_name)
 
     checkpoint = torch.load(args.checkpoint, map_location=device)
-    saved_args = checkpoint.get("args", train_meta)
+    saved_args = checkpoint.get("args")
+    if saved_args is None:
+        raise ValueError("Checkpoint missing training args metadata; please evaluate a checkpoint produced by the chunked trainer")
     model_args = SimpleNamespace(
         seq_hidden=saved_args["seq_hidden"],
         mlp_hidden=saved_args["mlp_hidden"],
@@ -183,22 +223,22 @@ def main() -> None:
     )
 
     model = HybridCNN(
-        seq_len=train_meta["seq_len"],
-        tab_dim=dataset.tabular.shape[1],
-        num_classes=dataset.num_classes,
-        num_versions=dataset.num_versions,
+        seq_len=manifest.seq_len,
+        tab_dim=manifest.tab_dim,
+        num_classes=manifest.num_classes,
+        num_versions=max(manifest.num_versions, 1),
         args=model_args,
     )
     model.load_state_dict(checkpoint["model"])
     model.to(device)
     model.eval()
 
-    preds, targets = evaluate(model, loader, device)
+    preds, targets = evaluate_manifest(model, manifest, args.batch_size, args.num_workers, device)
 
     overall_acc = (preds == targets).mean()
     macro_f1 = f1_score(targets, preds, average="macro")
 
-    label_names = train_meta["index_to_label"]
+    label_names = manifest.meta["index_to_label"]
     supports = np.bincount(targets, minlength=len(label_names))
     correct = np.bincount(targets[preds == targets], minlength=len(label_names))
     per_class_acc = np.divide(correct, supports, out=np.zeros_like(correct, dtype=np.float64), where=supports > 0)

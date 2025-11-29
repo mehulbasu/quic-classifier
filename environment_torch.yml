@@ -23,3 +23,9 @@ prefix: /mydata/conda-envs/pytorch
 
 # smoke test
 # torchrun --nproc_per_node=1 scripts/train_pytorch.py --data-dir datasets/training --cache-dir datasets/cache_pytorch_smoke --train-files flows-20221121.parquet --val-files flows-20221122.parquet --epochs 1 --batch-size 64 --val-batch-size 64 --num-workers 20 --log-interval 500
+
+# full run
+# python3 -m scripts.train_pytorch --num-workers 5 --log-interval 500 &> output.txt
+
+# eval
+# python3 -m scripts.eval_pytorch --checkpoint artifacts/cnn_ddp/checkpoint_best.pt --test-dir testing/ --rebuild-cache &> eval2.txt
