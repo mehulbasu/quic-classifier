@@ -15,6 +15,9 @@ dependencies:
   - scikit-learn
   - joblib
   - tqdm
+  - fastapi
+  - uvicorn
+  - pydantic
 
 prefix: /mydata/conda-envs/pytorch
 # conda env create -f environment_torch.yml -p /mydata/conda-envs/pytorch
