@@ -22,20 +22,20 @@ import pandas as pd
 
 # Expose a default so the script can be run without arguments during prototyping.
 DEFAULT_INPUTS: Sequence[Path] = (
-    Path("datasets/cesnet-quic22/W-2022-47/1_Mon/flows-20221121.csv.gz"),
-    Path("datasets/cesnet-quic22/W-2022-47/2_Tue/flows-20221122.csv.gz"),
-    Path("datasets/cesnet-quic22/W-2022-47/3_Wed/flows-20221123.csv.gz"),
-    Path("datasets/cesnet-quic22/W-2022-47/4_Thu/flows-20221124.csv.gz"),
-    Path("datasets/cesnet-quic22/W-2022-47/5_Fri/flows-20221125.csv.gz"),
-    Path("datasets/cesnet-quic22/W-2022-47/6_Sat/flows-20221126.csv.gz"),
-    Path("datasets/cesnet-quic22/W-2022-47/7_Sun/flows-20221127.csv.gz"),
-    Path("datasets/cesnet-quic22/W-2022-46/1_Mon/flows-20221114.csv.gz"),
-    Path("datasets/cesnet-quic22/W-2022-46/2_Tue/flows-20221115.csv.gz"),
-    Path("datasets/cesnet-quic22/W-2022-46/3_Wed/flows-20221116.csv.gz"),
-    Path("datasets/cesnet-quic22/W-2022-46/4_Thu/flows-20221117.csv.gz"),
-    Path("datasets/cesnet-quic22/W-2022-46/5_Fri/flows-20221118.csv.gz"),
-    Path("datasets/cesnet-quic22/W-2022-46/6_Sat/flows-20221119.csv.gz"),
-    Path("datasets/cesnet-quic22/W-2022-46/7_Sun/flows-20221120.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-44/1_Mon/flows-20221031.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-44/2_Tue/flows-20221101.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-44/3_Wed/flows-20221102.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-44/4_Thu/flows-20221103.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-44/5_Fri/flows-20221104.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-44/6_Sat/flows-20221105.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-44/7_Sun/flows-20221106.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-45/1_Mon/flows-20221107.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-45/2_Tue/flows-20221108.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-45/3_Wed/flows-20221109.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-45/4_Thu/flows-20221110.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-45/5_Fri/flows-20221111.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-45/6_Sat/flows-20221112.csv.gz"),
+    Path("datasets/cesnet-quic22/W-2022-45/7_Sun/flows-20221113.csv.gz"),
 )
 
 CHUNKSIZE = 1_000_000
