@@ -1,0 +1,31 @@
+name: pytorch
+
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+
+dependencies:
+  - pytorch
+  - pytorch-cuda=12.1
+  - numpy
+  - pandas
+  - pyarrow
+  - scikit-learn
+  - joblib
+  - tqdm
+
+prefix: /mydata/conda-envs/pytorch
+# conda env create -f environment_torch.yml -p /mydata/conda-envs/pytorch
+# conda activate /mydata/conda-envs/pytorch
+# conda env update -f environment_torch.yml -p /mydata/conda-envs/pytorch --prune
+
+# smoke test
+# torchrun --nproc_per_node=1 scripts/train_pytorch.py --data-dir datasets/training --cache-dir datasets/cache_pytorch_smoke --train-files flows-20221121.parquet --val-files flows-20221122.parquet --epochs 1 --batch-size 64 --val-batch-size 64 --num-workers 20 --log-interval 500
+
+# full run
+# python3 -m scripts.train_pytorch --num-workers 5 --log-interval 500 &> output.txt
+
+# eval
+# python3 -m scripts.eval_pytorch --checkpoint artifacts/cnn_ddp/checkpoint_best.pt --test-dir testing/ --rebuild-cache &> eval2.txt

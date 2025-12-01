@@ -1,0 +1,121 @@
+[test] Wrote 2,048,593 samples to chunk_00005_flows-20221119.pt
+[test] Wrote 2,715,249 samples to chunk_00006_flows-20221120.pt
+[test] Wrote 2,698,512 samples to chunk_00003_flows-20221117.pt
+[test] Wrote 3,622,460 samples to chunk_00004_flows-20221118.pt
+[test] Wrote 6,599,989 samples to chunk_00002_flows-20221116.pt
+[test] Wrote 8,034,932 samples to chunk_00001_flows-20221115.pt
+[test] Wrote 8,046,282 samples to chunk_00000_flows-20221114.pt
+/mydata/740-project/scripts/eval_pytorch.py:210: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  checkpoint = torch.load(args.checkpoint, map_location=device)
+/mydata/740-project/scripts/train_pytorch.py:669: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  payload = torch.load(chunk_path, map_location="cpu")
+Overall accuracy: 0.9994
+Macro F1: 0.9960
+
+Service performance (sorted by accuracy):
+Service                             acc  f1    support
+facebook-graph                      1.0000 1.0000 1020753
+endnote-click                       1.0000 0.9987   9241
+etoro                               1.0000 1.0000  26598
+onesignal                           1.0000 1.0000  80032
+google-www                          1.0000 1.0000 2330471
+facebook-gamesgraph                 1.0000 1.0000  48273
+google-safebrowsing                 1.0000 1.0000 1029326
+google-conncheck                    1.0000 1.0000  19095
+facebook-messenger                  1.0000 1.0000 161479
+facebook-rupload                    1.0000 1.0000  22078
+facebook-web                        1.0000 1.0000 892965
+firebase-crashlytics                1.0000 1.0000  73747
+ncbi-gov                            1.0000 0.9999  22796
+microsoft-substrate                 1.0000 1.0000  99962
+microsoft-outlook                   1.0000 1.0000 384258
+forum24                             1.0000 0.9998  21387
+gamedock                            1.0000 0.9999  22115
+kaggle                              1.0000 1.0000   3452
+google-colab                        1.0000 1.0000  42646
+joinhoney                           1.0000 0.9998  97779
+overleaf-cdn                        1.0000 0.9996   5078
+overleaf-compile                    1.0000 0.9998  11198
+playradio                           1.0000 0.9999 101104
+doi-org                             1.0000 0.9999  22382
+adavoid                             1.0000 0.9998   6250
+alza-identity                       1.0000 0.9878   2355
+alza-webapi                         1.0000 1.0000  71475
+alza-www                            1.0000 0.9998  91909
+apple-privaterelay                  1.0000 1.0000 323646
+bitdefender-nimbus                  1.0000 0.9998   2276
+google-recaptcha                    1.0000 1.0000  87690
+google-photos                       1.0000 1.0000  93879
+google-pay                          1.0000 0.9999 111431
+google-calendar                     1.0000 1.0000 276823
+cedexis                             1.0000 1.0000  21087
+chrome-remotedesktop                1.0000 1.0000  78120
+google-hangouts                     1.0000 0.9999  15929
+connectad                           1.0000 1.0000 326654
+csgo-market                         1.0000 1.0000  73780
+signal-cdn                          1.0000 0.9998  11020
+pocasidata-cz                       1.0000 0.9997   3761
+google-gstatic                      1.0000 1.0000 1775839
+google-translate                    1.0000 1.0000 342414
+dns-doh                             1.0000 1.0000 920090
+google-imasdk                       1.0000 1.0000 150420
+google-autofill                     1.0000 1.0000 374116
+google-fonts                        1.0000 1.0000 1350106
+google-services                     1.0000 1.0000 2108771
+discord                             1.0000 1.0000 885672
+facebook-connect                    1.0000 1.0000 345273
+jsdelivr                            1.0000 1.0000 242284
+cloudflare-cdnjs                    1.0000 1.0000 291648
+google-authentication               1.0000 1.0000 658389
+snapchat                            1.0000 1.0000 918498
+spotify                             1.0000 1.0000 1378187
+instagram                           0.9999 1.0000 1447929
+dm-de                               0.9999 0.9999  48130
+google-play                         0.9999 1.0000 1878495
+tiktok                              0.9999 1.0000  87503
+google-scholar                      0.9999 0.9999  39327
+facebook-media                      0.9999 0.9999 1086652
+chess-com                           0.9999 0.9997  71851
+youtube                             0.9999 0.9998 1608542
+fontawesome                         0.9998 0.9999 126629
+garmin                              0.9998 0.9999  66734
+goout                               0.9997 0.9998  11263
+usercentrics                        0.9997 0.9996  75522
+toggl                               0.9997 0.9995   2890
+flightradar24                       0.9996 0.9989  20478
+hubspot                             0.9996 0.9995  52267
+unitygames                          0.9996 0.9996  52603
+google-ads                          0.9995 0.9995 2222811
+rohlik                              0.9995 0.9994  23155
+shazam                              0.9995 0.9995   7535
+hcaptcha                            0.9994 0.9994  31032
+tawkto                              0.9994 0.9996  50425
+google-background                   0.9994 0.9995 1480828
+openx                               0.9993 0.9993 251743
+tinypass                            0.9992 0.9991  15556
+whatsapp                            0.9992 0.9996  95761
+mentimeter                          0.9991 0.9984  11566
+google-usercontent                  0.9990 0.9992 880265
+xhamster                            0.9990 0.9994  69106
+blitz-gg                            0.9989 0.9990  16806
+google-docs                         0.9989 0.9994 223839
+easybrain                           0.9986 0.9991  50788
+drmax                               0.9985 0.9988  16137
+default-background                  0.9984 0.9938 1340975
+google-drive                        0.9982 0.9989 112679
+facebook-background                 0.9976 0.9985  22287
+kiwi-com                            0.9966 0.9976  34877
+4chan                               0.9955 0.9967   6237
+gmail                               0.9954 0.9977  14430
+bitly                               0.9952 0.9976   5857
+ebay-kleinanzeigen                  0.9948 0.9965   2708
+sme-sk                              0.9948 0.9969 111583
+mdpi                                0.9936 0.9952  25754
+fitbit                              0.9897 0.9944   3121
+dcard                               0.9879 0.9929   6010
+revolut                             0.9847 0.9907   5107
+livescore                           0.9795 0.9896    731
+uber                                0.9630 0.9808   1487
+medium                              0.9539 0.9753  25948
+blogger                             0.9473 0.9708  10017
+spanbang                            0.5969 0.7465  24034
