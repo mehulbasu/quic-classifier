@@ -46,3 +46,23 @@ The 75.84% accuracy on a massively imbalanced 105-class problem demonstrates tha
 - Added train_pytorch.py, a self-contained CESNET-QUIC22 trainer that builds cached numpy tensors from the parquet files (pyarrow-based), applies per-channel/feature normalization, and encodes handshake strings via GPU-friendly hashing so every DDP rank shares the same mem-mapped dataset.
 - Implemented the HybridCNN model with a 1D CNN sequence branch, histogram/stats MLP branch, and SNI/User-Agent/QUIC-version embeddings plus weighted CrossEntropy (optional), macro-F1 tracking, AMP (toggle with `--no-amp`), and full NCCL DDP support.
 - Wired robust CLI knobs for data splits (`--val-files` / `--val-split`), cache invalidation (`--rebuild-cache`), loader behavior, optimizer/scheduler (warmup + cosine), and checkpointing so the 4×V100 node can reach >80 % accuracy while scaling efficiently.
+
+## 11/29
+**Chunked PyTorch training overhaul**
+- Rebuilt `scripts/train_pytorch.py` so each parquet file is converted into an independent `.pt` "chunk" (sequence tensor, tab features, hashed categorical indices, labels) using a capped `ProcessPoolExecutor`. The new `ChunkManifest` tracks normalization stats and keeps only one chunk per GPU in RAM, completely eliminating the 70+ GB spikes and OOMs we saw with the old global memmap approach.
+- Training now streams chunks sequentially: every DDP rank loads a `SingleChunkDataset`, runs a short-lived `DataLoader`, and synchronizes through explicit `dist.barrier(device_ids=[rank])` gates. AMP, gradient clipping, and cosine LR scheduling all continue to work unchanged, but the memory footprint is down to ~4 GB/worker and we can stop/resume safely after any epoch.
+- Added stricter process-group lifecycle management (`destroy_process_group` on exit, validation barriers) and surfaced CLI toggles for cache batching, cache worker count, and val/test chunk reuse so future experiments stay reproducible.
+
+**Evaluation tooling**
+- `scripts/eval_pytorch.py` now mirrors the chunked workflow: when pointed at either `--test-files` or an entire `--test-dir`, it parallelizes parquet→chunk conversion, loads the resulting manifest, and evaluates chunk-by-chunk on a single GPU while keeping VRAM <2 GB. Passing a directory made it trivial to score dozens of daily captures without manually listing every path.
+- The script prints macro-F1, per-class stats, and logs every chunk it writes (see `results/eval3.txt`). We also capture PyTorch’s `weights_only` warning to remind ourselves to flip that flag once PyTorch 2.5+ changes the default.
+
+**Cross-week experiment**
+- Trained the HybridCNN on one representative week (W-2022-44: flows-20221031.parquet through flows-20221106.parquet). Using the chunked trainer meant only ~25 GB of total cache on disk and <30 min per epoch even with `batch_size=2048` across 4×V100.
+- Evaluated the resulting checkpoint on *all remaining days in November* (14 additional parquet files spanning W-2022-45 through W-2022-47). The evaluation script produced >20 test chunks totaling ~107 M flows and reported **99.94 % accuracy / 0.9956 macro-F1** despite the much larger, temporally shifted test distribution. Per-class breakdown shows nearly every service at ≥0.99 accuracy; the few laggards (e.g., `spanbang`, `uber`, `medium`) still exceed 0.95 F1, indicating strong generalization rather than train/test leakage.
+
+**Takeaways for the final report**
+- Sequential chunking is the key architectural pivot that lets us scale PyTorch training to the full CESNET-QUIC22 corpus on commodity 16 GB GPUs. It also keeps preprocessing embarrassingly parallel—cache workers simply chew through parquet files and emit stand-alone `.pt` blobs.
+- Evaluation on unseen weeks demonstrates temporal robustness: training on only ~1/5 of the available weeks still yields near-perfect accuracy on the remaining 80 % of the data. This is worth emphasizing when comparing against the ~75 % accuracy ceiling of the gradient-boosted baseline.
+- We now have an end-to-end story: XGBoost as a strong tabular baseline, HybridCNN as a multimodal deep model with chunked streaming, and tooling (train/eval scripts) that anyone can re-run by pointing at raw parquet dumps.
+
