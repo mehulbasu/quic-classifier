@@ -138,3 +138,14 @@ Refactor the training loop to implement **"Sequential Chunk Training"**. The sys
     * Preserve the existing `HybridCNN` (1D CNN + MLP) exactly as is.
 
 Generate the complete, runnable Python script.
+
+---
+
+Prompt for demo client/server is listed in demo/generate_sample.py.
+
+I have been running tests with the updated client and server but now I'm facing a new issue. I have tested with my browser on youtube, gmail, google docs where i've confirmed that it used http3 each time. still, all kinds of traffic is being classified as 'blogger' which is the site blogger.com, which I have never visited. I have attached a .csv file which is a report of my recent run where I was on google docs the entire time. I know google-docs and google-fonts are supported class labels in the dataset. Why is this issue happening? 
+- One potential issue that I can think of is that there is a discrepancy between the cesnet-quic22 dataset and our input data. To gather the flows for an identified service, the researchers performed a lot of filtering. Please look into the paper "CESNET-QUIC22: A large one-month QUIC
+network traﬃc dataset from backbone lines" for further details.
+- is background traffic hampering the model's predictions?
+- is it incorrectly using service number identifiers to classify flows?
+please investigate this to the fullest extent, particularly focusing on the differences between the research dataset and our input data.

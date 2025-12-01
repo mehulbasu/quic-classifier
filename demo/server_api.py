@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
+# uvicorn demo.server_api:app --host 0.0.0.0 --port 8000 &> demo/server.log
 """FastAPI inference server for the HybridCNN QUIC classifier."""
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import sys
-from pathlib import Path as _Path
 
 import torch
 import torch.nn.functional as F
@@ -21,6 +22,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.train_pytorch import HybridCNN
+
+LOGGER = logging.getLogger("server_api")
+if not LOGGER.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [server_api] %(message)s")
 
 MODEL_PATH = Path("artifacts/cnn_ddp/checkpoint_best.pt")
 META_PATH = Path("datasets/cache_pytorch/train/meta.json")
@@ -78,6 +83,7 @@ class _ServerState:
         self.seq_std = torch.tensor(normalization["seq_std"], dtype=torch.float32, device=self.device).clamp_min_(1e-6).view(1, -1, 1)
         self.tab_mean = torch.tensor(normalization["tab_mean"], dtype=torch.float32, device=self.device).view(1, -1)
         self.tab_std = torch.tensor(normalization["tab_std"], dtype=torch.float32, device=self.device).clamp_min_(1e-6).view(1, -1)
+        self.expected_tab_dim = self.tab_mean.shape[1]
         self.model = _load_model(MODEL_PATH, self.meta, self.device)
 
     def predict(self, payload: "PredictRequest") -> Dict[str, Any]:
@@ -86,6 +92,23 @@ class _ServerState:
         sni = torch.tensor([payload.sni_idx], dtype=torch.long, device=self.device)
         ua = torch.tensor([payload.ua_idx], dtype=torch.long, device=self.device)
         version = torch.tensor([payload.version_idx], dtype=torch.long, device=self.device)
+
+        orig_tab_dim = tab.shape[1]
+        if orig_tab_dim < self.expected_tab_dim:
+            pad = torch.zeros(1, self.expected_tab_dim - orig_tab_dim, dtype=torch.float32, device=self.device)
+            tab = torch.cat([tab, pad], dim=1)
+            LOGGER.warning(
+                "Tabular vector too short (%s < %s); padding with zeros",
+                orig_tab_dim,
+                self.expected_tab_dim,
+            )
+        elif orig_tab_dim > self.expected_tab_dim:
+            LOGGER.warning(
+                "Tabular vector too long (%s > %s); truncating",
+                orig_tab_dim,
+                self.expected_tab_dim,
+            )
+            tab = tab[:, : self.expected_tab_dim]
 
         seq = (seq - self.seq_mean) / self.seq_std
         tab = (tab - self.tab_mean) / self.tab_std
@@ -131,10 +154,22 @@ class PredictResponse(BaseModel):
 
 @app.post("/predict", response_model=PredictResponse)
 def predict(request: PredictRequest) -> PredictResponse:
+    seq_channels = len(request.sequences)
+    seq_len = len(request.sequences[0]) if request.sequences else 0
+    LOGGER.info(
+        "Received request seq_shape=[%s,%s] tab_dim=%s sni=%s ua=%s version=%s",
+        seq_channels,
+        seq_len,
+        len(request.tabular),
+        request.sni_idx,
+        request.ua_idx,
+        request.version_idx,
+    )
     try:
         result = STATE.predict(request)
         return PredictResponse(**result)
     except Exception as exc:  # pragma: no cover - runtime safeguard
+        LOGGER.exception("Prediction failed: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
