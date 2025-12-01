@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Streamlit client that sniffs QUIC flows and calls the inference API."""
+# sudo -E streamlit run demo/mac_agent.py
 from __future__ import annotations
 
 import math
@@ -17,7 +18,8 @@ from scapy.all import AsyncSniffer, IP, UDP  # type: ignore
 
 API_URL = "http://localhost:8000/predict"
 FLOW_TARGET_LEN = 30
-TABULAR_DIM = 64
+# The trained HybridCNN expects 49 tabular stats (per meta.json -> tab_dim).
+TABULAR_DIM = 49
 PACKET_LOG_LIMIT = 20
 
 
@@ -217,10 +219,10 @@ if "predictions" not in st.session_state:
 
 for entry in _drain_results(state):
     st.session_state.predictions.append(entry)
-    st.session_state.predictions = st.session_state.predictions[-50:]
+    st.session_state.predictions = st.session_state.predictions[-100:]
 
 if st.session_state.predictions:
-    st.subheader("Latest predictions (max 50)")
+    st.subheader("Latest predictions (max 100)")
     st.dataframe(st.session_state.predictions[::-1], use_container_width=True)
 else:
     st.info("Waiting for a flow to reach 30 packets on UDP/443…")
