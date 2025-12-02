@@ -68,6 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-every", type=int, default=0, help="Optional checkpoint frequency in epochs")
     parser.add_argument("--amp-loss-scale", type=float, default=1024.0)
     parser.add_argument("--cache-wait-seconds", type=int, default=7200, help="Seconds non-primary ranks wait for cache files")
+    parser.add_argument("--sequence-only", action="store_true", help="Zero out static/tabular inputs so the model trains on sequences only")
     return parser.parse_args()
 
 
@@ -860,6 +861,12 @@ def train_single_chunk(
         version_idx = batch["version_idx"].to(device, non_blocking=True)
         targets = batch["label"].to(device, non_blocking=True)
 
+        if args.sequence_only:
+            tabular = torch.zeros_like(tabular)
+            sni_idx = torch.zeros_like(sni_idx)
+            ua_idx = torch.zeros_like(ua_idx)
+            version_idx = torch.zeros_like(version_idx)
+
         with amp.autocast("cuda", dtype=autocast_dtype, enabled=args.use_amp):
             logits = model(sequences, tabular, sni_idx, ua_idx, version_idx)
             loss = criterion(logits, targets)
@@ -961,6 +968,11 @@ def evaluate_single_chunk(
             ua_idx = batch["ua_idx"].to(device, non_blocking=True)
             version_idx = batch["version_idx"].to(device, non_blocking=True)
             targets = batch["label"].to(device, non_blocking=True)
+            if args.sequence_only:
+                tabular = torch.zeros_like(tabular)
+                sni_idx = torch.zeros_like(sni_idx)
+                ua_idx = torch.zeros_like(ua_idx)
+                version_idx = torch.zeros_like(version_idx)
             with amp.autocast("cuda", dtype=autocast_dtype, enabled=args.use_amp):
                 logits = model(sequences, tabular, sni_idx, ua_idx, version_idx)
                 loss = criterion(logits, targets)
