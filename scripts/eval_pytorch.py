@@ -55,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cache-batch-rows", type=int, default=65536)
     parser.add_argument("--cache-workers", type=int, default=10, help="Parallel workers for cache building")
     parser.add_argument("--rebuild-cache", action="store_true")
+    parser.add_argument("--sequence-only", action="store_true", help="Zero out static/tabular inputs like sequence-only checkpoint")
     return parser.parse_args()
 
 
@@ -118,7 +119,7 @@ def release_cuda_cache() -> None:
         torch.cuda.empty_cache()
 
 
-def evaluate_loader(model: HybridCNN, loader: DataLoader, device: torch.device) -> Tuple[np.ndarray, np.ndarray]:
+def evaluate_loader(model: HybridCNN, loader: DataLoader, device: torch.device, args: argparse.Namespace) -> Tuple[np.ndarray, np.ndarray]:
     preds: List[np.ndarray] = []
     targets: List[np.ndarray] = []
     with torch.no_grad():
@@ -129,6 +130,11 @@ def evaluate_loader(model: HybridCNN, loader: DataLoader, device: torch.device) 
             ua_idx = batch["ua_idx"].to(device, non_blocking=True).long()
             version_idx = batch["version_idx"].to(device, non_blocking=True).long()
             labels = batch["label"].to(device, non_blocking=True).long()
+            if args.sequence_only:
+                tabular = torch.zeros_like(tabular)
+                sni_idx = torch.zeros_like(sni_idx)
+                ua_idx = torch.zeros_like(ua_idx)
+                version_idx = torch.zeros_like(version_idx)
             logits = model(sequences, tabular, sni_idx, ua_idx, version_idx)
             pred = logits.argmax(dim=1)
             preds.append(pred.cpu().numpy())
@@ -144,6 +150,7 @@ def evaluate_manifest(
     batch_size: int,
     num_workers: int,
     device: torch.device,
+    args: argparse.Namespace,
 ) -> Tuple[np.ndarray, np.ndarray]:
     preds_all: List[np.ndarray] = []
     targets_all: List[np.ndarray] = []
@@ -157,7 +164,7 @@ def evaluate_manifest(
             num_workers=num_workers,
             pin_memory=True,
         )
-        chunk_preds, chunk_targets = evaluate_loader(model, loader, device)
+        chunk_preds, chunk_targets = evaluate_loader(model, loader, device, args)
         if chunk_preds.size == 0:
             continue
         preds_all.append(chunk_preds)
@@ -233,7 +240,7 @@ def main() -> None:
     model.to(device)
     model.eval()
 
-    preds, targets = evaluate_manifest(model, manifest, args.batch_size, args.num_workers, device)
+    preds, targets = evaluate_manifest(model, manifest, args.batch_size, args.num_workers, device, args)
 
     overall_acc = (preds == targets).mean()
     macro_f1 = f1_score(targets, preds, average="macro")
