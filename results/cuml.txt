@@ -1,0 +1,18 @@
+Training samples: 1000000
+Unique classes: 105
+Parameters: n_estimators=400 max_depth=16 min_samples_leaf=10 n_bins=64 n_streams=8
+Training time (GPU): 35.1s
+Evaluation samples: 1000000
+Accuracy: 0.638
+Macro F1: 0.397
+Classification report (top 10 classes by support):
+google-www                prec=0.582 rec=0.591 f1=0.587 support=71636
+google-ads                prec=0.378 rec=0.577 f1=0.456 support=69748
+google-services           prec=0.811 rec=0.784 f1=0.797 support=60512
+google-play               prec=0.572 rec=0.745 f1=0.647 support=55311
+google-gstatic            prec=0.859 rec=0.704 f1=0.774 support=51278
+google-background         prec=0.496 rec=0.304 f1=0.377 support=46330
+youtube                   prec=0.598 rec=0.497 f1=0.543 support=44735
+google-fonts              prec=0.547 rec=0.714 f1=0.619 support=42650
+instagram                 prec=0.802 rec=0.844 f1=0.822 support=41964
+default-background        prec=0.425 rec=0.614 f1=0.503 support=37699

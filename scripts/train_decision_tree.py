@@ -16,8 +16,8 @@ from scripts.load_day import (
     load_cached_training_matrices,
 )
 
-TRAIN_DAY = Path("datasets/cesnet-quic22/W-2022-47/1_Mon/flows-20221121.csv.gz")
-EVAL_DAY = Path("datasets/cesnet-quic22/W-2022-47/3_Wed/flows-20221123.csv.gz")
+TRAIN_DAY = Path("datasets/training/flows-20221121.parquet")
+EVAL_DAY = Path("datasets/training/flows-20221123.parquet")
 
 SAMPLE_LIMIT: Optional[int] = 1_000_000
 USE_CACHE = True
@@ -41,7 +41,7 @@ def main() -> None:
     X_train, y_train = sample_matrices(X_train_full, y_train_full, SAMPLE_LIMIT)
 
     model = DecisionTreeClassifier(
-        max_depth=20,
+        max_depth=None,
         min_samples_leaf=200,
         random_state=RANDOM_STATE,
     )
