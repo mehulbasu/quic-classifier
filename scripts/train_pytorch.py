@@ -48,6 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cache-workers", type=int, default=7, help="Parallel workers for cache building (max 10)")
     parser.add_argument("--mlp-hidden", type=int, default=512)
     parser.add_argument("--seq-hidden", type=int, default=256)
+    parser.add_argument("--version-embed-dim", type=int, default=16)
     parser.add_argument("--dropout", type=float, default=0.3)
     parser.add_argument("--label-smoothing", type=float, default=0.05)
     parser.add_argument("--use-class-weights", action="store_true")
@@ -105,14 +106,16 @@ def build_caches_if_needed(args: argparse.Namespace, is_primary: bool) -> Tuple[
         if need_train or need_val:
             print(f"Preparing caches (train files={len(train_files)}, val files={len(val_files)})", flush=True)
             label_map: Dict[str, int]
+            version_values: List[int]
             normalization: Optional[Dict[str, List[float]]] = None
             if need_train:
-                label_map, _ = collect_label_info(train_files)
+                label_map, version_values, _ = collect_label_and_version_info(train_files)
                 train_meta = prepare_split_cache(
                     "train",
                     train_files,
                     args,
                     label_map,
+                    version_values,
                     None,
                     args.rebuild_cache,
                 )
@@ -121,6 +124,7 @@ def build_caches_if_needed(args: argparse.Namespace, is_primary: bool) -> Tuple[
                 with open(train_meta_path, "r", encoding="utf-8") as handle:
                     cached_meta = json.load(handle)
                 label_map = {k: int(v) for k, v in cached_meta["label_to_index"].items()}
+                version_values = cached_meta.get("version_values", [])
                 normalization = cached_meta["normalization"]
 
             if need_val and val_files:
@@ -129,6 +133,7 @@ def build_caches_if_needed(args: argparse.Namespace, is_primary: bool) -> Tuple[
                     val_files,
                     args,
                     label_map,
+                    version_values,
                     normalization,
                     args.rebuild_cache,
                 )
@@ -185,9 +190,10 @@ def resolve_file_lists(
     return train_paths, val_paths
 
 
-def collect_label_info(files: Sequence[Path], batch_rows: int = 500_000) -> Tuple[Dict[str, int], Counter]:
+def collect_label_and_version_info(files: Sequence[Path], batch_rows: int = 500_000) -> Tuple[Dict[str, int], List[int], Counter]:
     label_counts: Counter = Counter()
-    columns = ["APP"]
+    version_values: set[int] = set()
+    columns = ["APP", "QUIC_VERSION"]
     for path in files:
         parquet_file = pq.ParquetFile(str(path))
         for batch in parquet_file.iter_batches(columns=columns, batch_size=batch_rows):
@@ -195,9 +201,13 @@ def collect_label_info(files: Sequence[Path], batch_rows: int = 500_000) -> Tupl
             for label in data["APP"]:
                 if label is not None:
                     label_counts[label] += 1
+            for version in data["QUIC_VERSION"]:
+                if version is not None:
+                    version_values.add(int(version))
     labels_sorted = sorted(label_counts.keys())
     label_map = {label: idx for idx, label in enumerate(labels_sorted)}
-    return label_map, label_counts
+    version_list = sorted(version_values)
+    return label_map, version_list, label_counts
 
 
 def parse_sequence_value(seq_value: Optional[str], seq_len: int) -> Tuple[np.ndarray, int]:
@@ -284,6 +294,7 @@ class SplitCacheBuilder:
         "PROTOCOL",
         "SRC_PORT",
         "DST_PORT",
+        "QUIC_VERSION",
     )
 
     def __init__(
@@ -293,6 +304,7 @@ class SplitCacheBuilder:
         cache_dir: Path,
         seq_len: int,
         label_map: Dict[str, int],
+        version_values: Sequence[int],
         normalization: Optional[Dict[str, List[float]]],
         batch_rows: int,
         num_workers: int,
@@ -304,9 +316,10 @@ class SplitCacheBuilder:
         self.chunk_dir = cache_dir / "chunks"
         self.seq_len = seq_len
         self.label_map = label_map
+        self.version_map = {value: idx + 1 for idx, value in enumerate(version_values)}
         self.normalization = normalization
         self.batch_rows = batch_rows
-        self.num_workers = max(1, min(num_workers, 10))
+        self.num_workers = max(1, min(num_workers, 18))
         self.rebuild = rebuild
 
     def build(self) -> Dict[str, object]:
@@ -322,6 +335,7 @@ class SplitCacheBuilder:
                     "chunk_path": str(self.chunk_dir / chunk_name),
                     "seq_len": self.seq_len,
                     "label_map": self.label_map,
+                    "version_map": self.version_map,
                     "batch_rows": self.batch_rows,
                 }
             )
@@ -403,6 +417,7 @@ class SplitCacheBuilder:
             "num_classes": len(self.label_map),
             "label_to_index": self.label_map,
             "index_to_label": sorted(self.label_map, key=self.label_map.get),
+            "version_values": list(self.version_map.keys()),
             "class_counts": class_counts.tolist(),
             "normalization": normalization,
             "chunks": chunk_entries,
@@ -420,6 +435,7 @@ def _cache_worker_entry(config: Dict[str, object]) -> Dict[str, object]:
     chunk_path = Path(config["chunk_path"])
     seq_len = int(config["seq_len"])
     label_map: Dict[str, int] = config["label_map"]
+    version_map: Dict[int, int] = config["version_map"]
     batch_rows = int(config["batch_rows"])
 
     parquet_file = pq.ParquetFile(str(parquet_path))
@@ -427,6 +443,7 @@ def _cache_worker_entry(config: Dict[str, object]) -> Dict[str, object]:
     total_rows = max(int(total_rows), 1)
     sequences = np.zeros((total_rows, 3, seq_len), dtype=np.float32)
     tabular: Optional[np.ndarray] = None
+    version_idx = np.zeros(total_rows, dtype=np.int32)
     labels = np.zeros(total_rows, dtype=np.int64)
 
     seq_sum = np.zeros(3, dtype=np.float64)
@@ -464,6 +481,9 @@ def _cache_worker_entry(config: Dict[str, object]) -> Dict[str, object]:
             tab_sum += tab_vec
             tab_sumsq += tab_vec ** 2
 
+            version_value = data["QUIC_VERSION"][local_idx]
+            version_idx[row_ptr] = version_map.get(int(version_value), 0) if version_value is not None else 0
+
             label_id = label_map[label_name]
             labels[row_ptr] = label_id
             class_counts[label_id] += 1
@@ -477,12 +497,14 @@ def _cache_worker_entry(config: Dict[str, object]) -> Dict[str, object]:
         tab_sumsq = np.zeros(1, dtype=np.float64)
     else:
         tabular = np.ascontiguousarray(tabular[:row_ptr])
+    version_idx = np.ascontiguousarray(version_idx[:row_ptr])
     labels = np.ascontiguousarray(labels[:row_ptr])
 
     if row_ptr > 0:
         payload = {
             "sequences": torch.from_numpy(sequences.copy()),
             "tabular": torch.from_numpy(tabular.copy()),
+            "version_idx": torch.from_numpy(version_idx.copy()),
             "labels": torch.from_numpy(labels.copy()),
         }
         torch.save(payload, chunk_path)
@@ -508,6 +530,7 @@ def prepare_split_cache(
     files: Sequence[Path],
     args: argparse.Namespace,
     label_map: Dict[str, int],
+    version_values: Sequence[int],
     normalization: Optional[Dict[str, List[float]]],
     rebuild: bool,
 ) -> Dict[str, object]:
@@ -522,6 +545,7 @@ def prepare_split_cache(
         cache_dir=split_dir,
         seq_len=args.max_seq_len,
         label_map=label_map,
+            version_values=version_values,
         normalization=normalization,
         batch_rows=args.cache_batch_rows,
         num_workers=args.cache_workers,
@@ -566,6 +590,10 @@ class ChunkManifest:
         return int(self.meta["num_classes"])
 
     @property
+    def num_versions(self) -> int:
+        return len(self.meta.get("version_values", []))
+
+    @property
     def class_counts(self) -> Sequence[int]:
         return self.meta.get("class_counts", [])
 
@@ -595,6 +623,7 @@ class SingleChunkDataset(Dataset):
         payload = torch.load(chunk_path, map_location="cpu")
         self.sequences: torch.Tensor = payload["sequences"].float()
         self.tabular: torch.Tensor = payload["tabular"].float()
+        self.version_idx: torch.Tensor = payload["version_idx"].long()
         self.labels: torch.Tensor = payload["labels"].long()
 
         seq_mean = torch.tensor(normalization["seq_mean"], dtype=torch.float32).view(1, -1, 1)
@@ -620,6 +649,7 @@ class SingleChunkDataset(Dataset):
         return {
             "sequences": self.sequences[index],
             "tabular": self.tabular[index],
+            "version_idx": self.version_idx[index],
             "label": self.labels[index],
         }
 
@@ -630,6 +660,7 @@ class HybridCNN(nn.Module):
         seq_len: int,
         tab_dim: int,
         num_classes: int,
+        num_versions: int,
         args: argparse.Namespace,
     ) -> None:
         super().__init__()
@@ -647,7 +678,9 @@ class HybridCNN(nn.Module):
             nn.Flatten(),
         )
 
-        static_in = tab_dim
+        static_in = tab_dim + args.version_embed_dim
+
+        self.version_emb = nn.Embedding(max(num_versions + 1, 1), args.version_embed_dim, padding_idx=0)
 
         self.static_branch = nn.Sequential(
             nn.Linear(static_in, args.mlp_hidden),
@@ -674,9 +707,11 @@ class HybridCNN(nn.Module):
         self,
         sequences: torch.Tensor,
         tabular: torch.Tensor,
+        version_idx: torch.Tensor,
     ) -> torch.Tensor:
         seq_feat = self.seq_branch(sequences)
-        static_input = tabular
+        version_feat = self.version_emb(version_idx)
+        static_input = torch.cat([tabular, version_feat], dim=1)
         static_feat = self.static_branch(static_input)
         fused = torch.cat([seq_feat, static_feat], dim=1)
         return self.head(fused)
@@ -765,13 +800,15 @@ def train_single_chunk(
     for step, batch in enumerate(loader):
         sequences = batch["sequences"].to(device, non_blocking=True)
         tabular = batch["tabular"].to(device, non_blocking=True)
+        version_idx = batch["version_idx"].to(device, non_blocking=True)
         targets = batch["label"].to(device, non_blocking=True)
 
         if args.sequence_only:
             tabular = torch.zeros_like(tabular)
+            version_idx = torch.zeros_like(version_idx)
 
         with amp.autocast("cuda", dtype=autocast_dtype, enabled=args.use_amp):
-            logits = model(sequences, tabular)
+            logits = model(sequences, tabular, version_idx)
             loss = criterion(logits, targets)
 
         scaler.scale(loss).backward()
@@ -867,11 +904,13 @@ def evaluate_single_chunk(
         for batch in loader:
             sequences = batch["sequences"].to(device, non_blocking=True)
             tabular = batch["tabular"].to(device, non_blocking=True)
+            version_idx = batch["version_idx"].to(device, non_blocking=True)
             targets = batch["label"].to(device, non_blocking=True)
             if args.sequence_only:
                 tabular = torch.zeros_like(tabular)
+                version_idx = torch.zeros_like(version_idx)
             with amp.autocast("cuda", dtype=autocast_dtype, enabled=args.use_amp):
-                logits = model(sequences, tabular)
+                logits = model(sequences, tabular, version_idx)
                 loss = criterion(logits, targets)
             batch_size = targets.size(0)
             total_loss += loss.item() * batch_size
@@ -1019,6 +1058,7 @@ def main_worker(rank: int, world_size: int, args: argparse.Namespace) -> None:
         seq_len=train_manifest.seq_len,
         tab_dim=train_manifest.tab_dim,
         num_classes=train_manifest.num_classes,
+        num_versions=train_manifest.num_versions,
         args=args,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)

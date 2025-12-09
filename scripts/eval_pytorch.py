@@ -53,7 +53,7 @@ def parse_args() -> argparse.Namespace:
         help="DataLoader workers per chunk (0 avoids duplicating chunk tensors per worker)",
     )
     parser.add_argument("--cache-batch-rows", type=int, default=65536)
-    parser.add_argument("--cache-workers", type=int, default=10, help="Parallel workers for cache building")
+    parser.add_argument("--cache-workers", type=int, default=18, help="Parallel workers for cache building")
     parser.add_argument("--rebuild-cache", action="store_true")
     parser.add_argument("--sequence-only", action="store_true", help="Zero out static/tabular inputs like sequence-only checkpoint")
     return parser.parse_args()
@@ -126,16 +126,12 @@ def evaluate_loader(model: HybridCNN, loader: DataLoader, device: torch.device, 
         for batch in loader:
             sequences = batch["sequences"].to(device, non_blocking=True)
             tabular = batch["tabular"].to(device, non_blocking=True)
-            sni_idx = batch["sni_idx"].to(device, non_blocking=True).long()
-            ua_idx = batch["ua_idx"].to(device, non_blocking=True).long()
             version_idx = batch["version_idx"].to(device, non_blocking=True).long()
             labels = batch["label"].to(device, non_blocking=True).long()
             if args.sequence_only:
                 tabular = torch.zeros_like(tabular)
-                sni_idx = torch.zeros_like(sni_idx)
-                ua_idx = torch.zeros_like(ua_idx)
                 version_idx = torch.zeros_like(version_idx)
-            logits = model(sequences, tabular, sni_idx, ua_idx, version_idx)
+            logits = model(sequences, tabular, version_idx)
             pred = logits.argmax(dim=1)
             preds.append(pred.cpu().numpy())
             targets.append(labels.cpu().numpy())
@@ -196,8 +192,6 @@ def main() -> None:
     cache_args = SimpleNamespace(
         cache_dir=str(args.cache_dir),
         max_seq_len=train_meta["seq_len"],
-        sni_hash_size=train_meta["sni_hash_size"],
-        ua_hash_size=train_meta["ua_hash_size"],
         cache_batch_rows=args.cache_batch_rows,
         cache_workers=args.cache_workers,
     )
@@ -222,18 +216,14 @@ def main() -> None:
         seq_hidden=saved_args["seq_hidden"],
         mlp_hidden=saved_args["mlp_hidden"],
         dropout=saved_args["dropout"],
-        sni_embed_dim=saved_args["sni_embed_dim"],
-        ua_embed_dim=saved_args["ua_embed_dim"],
-        version_embed_dim=saved_args["version_embed_dim"],
-        sni_hash_size=saved_args["sni_hash_size"],
-        ua_hash_size=saved_args["ua_hash_size"],
+        version_embed_dim=saved_args.get("version_embed_dim", 16),
     )
 
     model = HybridCNN(
         seq_len=manifest.seq_len,
         tab_dim=manifest.tab_dim,
         num_classes=manifest.num_classes,
-        num_versions=max(manifest.num_versions, 1),
+        num_versions=max(getattr(manifest, "num_versions", 0), 1),
         args=model_args,
     )
     model.load_state_dict(checkpoint["model"])
