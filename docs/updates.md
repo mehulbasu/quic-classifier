@@ -46,3 +46,79 @@ The 75.84% accuracy on a massively imbalanced 105-class problem demonstrates tha
 - Added train_pytorch.py, a self-contained CESNET-QUIC22 trainer that builds cached numpy tensors from the parquet files (pyarrow-based), applies per-channel/feature normalization, and encodes handshake strings via GPU-friendly hashing so every DDP rank shares the same mem-mapped dataset.
 - Implemented the HybridCNN model with a 1D CNN sequence branch, histogram/stats MLP branch, and SNI/User-Agent/QUIC-version embeddings plus weighted CrossEntropy (optional), macro-F1 tracking, AMP (toggle with `--no-amp`), and full NCCL DDP support.
 - Wired robust CLI knobs for data splits (`--val-files` / `--val-split`), cache invalidation (`--rebuild-cache`), loader behavior, optimizer/scheduler (warmup + cosine), and checkpointing so the 4×V100 node can reach >80 % accuracy while scaling efficiently.
+
+## 11/29
+**Chunked PyTorch training overhaul**
+- Rebuilt `scripts/train_pytorch.py` so each parquet file is converted into an independent `.pt` "chunk" (sequence tensor, tab features, hashed categorical indices, labels) using a capped `ProcessPoolExecutor`. The new `ChunkManifest` tracks normalization stats and keeps only one chunk per GPU in RAM, completely eliminating the 70+ GB spikes and OOMs we saw with the old global memmap approach.
+- Training now streams chunks sequentially: every DDP rank loads a `SingleChunkDataset`, runs a short-lived `DataLoader`, and synchronizes through explicit `dist.barrier(device_ids=[rank])` gates. AMP, gradient clipping, and cosine LR scheduling all continue to work unchanged, but the memory footprint is down to ~4 GB/worker and we can stop/resume safely after any epoch.
+- Added stricter process-group lifecycle management (`destroy_process_group` on exit, validation barriers) and surfaced CLI toggles for cache batching, cache worker count, and val/test chunk reuse so future experiments stay reproducible.
+
+**Evaluation tooling**
+- `scripts/eval_pytorch.py` now mirrors the chunked workflow: when pointed at either `--test-files` or an entire `--test-dir`, it parallelizes parquet→chunk conversion, loads the resulting manifest, and evaluates chunk-by-chunk on a single GPU while keeping VRAM <2 GB. Passing a directory made it trivial to score dozens of daily captures without manually listing every path.
+- The script prints macro-F1, per-class stats, and logs every chunk it writes (see `results/eval3.txt`). We also capture PyTorch’s `weights_only` warning to remind ourselves to flip that flag once PyTorch 2.5+ changes the default.
+
+**Cross-week experiment**
+- Trained the HybridCNN on one representative week (W-2022-44: flows-20221031.parquet through flows-20221106.parquet). Using the chunked trainer meant only ~25 GB of total cache on disk and <30 min per epoch even with `batch_size=2048` across 4×V100.
+- Evaluated the resulting checkpoint on *all remaining days in November* (14 additional parquet files spanning W-2022-45 through W-2022-47). The evaluation script produced >20 test chunks totaling ~107 M flows and reported **99.94 % accuracy / 0.9956 macro-F1** despite the much larger, temporally shifted test distribution. Per-class breakdown shows nearly every service at ≥0.99 accuracy; the few laggards (e.g., `spanbang`, `uber`, `medium`) still exceed 0.95 F1, indicating strong generalization rather than train/test leakage.
+
+**Takeaways for the final report**
+- Sequential chunking is the key architectural pivot that lets us scale PyTorch training to the full CESNET-QUIC22 corpus on commodity 16 GB GPUs. It also keeps preprocessing embarrassingly parallel—cache workers simply chew through parquet files and emit stand-alone `.pt` blobs.
+- Evaluation on unseen weeks demonstrates temporal robustness: training on only ~1/5 of the available weeks still yields near-perfect accuracy on the remaining 80 % of the data. This is worth emphasizing when comparing against the ~75 % accuracy ceiling of the gradient-boosted baseline.
+- We now have an end-to-end story: XGBoost as a strong tabular baseline, HybridCNN as a multimodal deep model with chunked streaming, and tooling (train/eval scripts) that anyone can re-run by pointing at raw parquet dumps.
+
+
+## 12/1
+**FastAPI + Streamlit demo sprint**
+- Packaged the HybridCNN checkpoint into a standalone FastAPI service (`demo/server_api.py`) that loads metadata, restores normalization tensors, and pads/truncates incoming tabular stats to the expected 49-dim shape so we can accept imperfect capture clients without crashing. Added detailed logging (request shapes, categorical indices, padding warnings) and a CLI harness to replay JSON payloads, which made it easy to validate the golden sample before wiring up live traffic.
+- Built a Streamlit/Scapy agent (`demo/mac_agent.py`) that sniffs UDP/443 flows, derives the 3×30 sequence tensors (log packet sizes, local/remote direction, log inter-packet timing), and streams predictions to the server in real time. Instrumented it with packet logs, interface controls, and a rolling dataframe of predictions suitable for screen captures in the final demo.
+- Debugged the end-to-end path: initial requests failed with HTTP 400 because the agent emitted a 64-dim tabular vector while the model expected 49 features from the CESNET preprocessing. Fixed this by hard-coding `TABULAR_DIM=49` on the client and letting the server pad/truncate as a guardrail. After the fix we observed chained 200 OK responses in `demo/server.log` and the agent exported a CSV of predictions for documentation.
+- Investigated qualitative accuracy: even when browsing Google Docs/Drive, the live captures were consistently labeled “blogger.” The root cause is feature drift—our client currently zero-fills all tabular stats and categorical hashes, whereas the trained model relies on rich histogram, ASN, SNI, and UA signals extracted from the CESNET parquet pipeline. Documented this gap so the final report can explain why the demo proves infrastructure readiness (ingestion, normalization, inference, UI) but still needs real feature extraction on the capture host to reproduce the 99%+ lab accuracy.
+    - Every flow the client sends right now is an ad‑hoc 3×30 sequence with all-zero tabular features, no SNI/User-Agent/version info, and just the raw packet lengths captured on your laptop. That bears almost no resemblance to the features we trained on: CESNET-QUIC22 rows include >40 histogram/count features (per-direction byte/packet histograms, PPI stats, ASN/port indicators, flow end reasons, etc.), hashed SNI/user-agent buckets, and QUIC version IDs extracted from NetFlow records traversing nationwide backbone taps. Feeding zeroed tabular vectors removes most of the signal the model learned, so it latches onto the only patterns present—the short initial bursts heading to Google’s blog CDN (which shares TLS certs/SNIs with other Google services) and thus defaults to “blogger.”
+
+    - The dataset’s “service” labels aren’t inferred purely from IPs; the authors filtered each flow by correlating TLS handshakes (SNI, QUIC UA, IP → ASN mappings) against curated allowlists. Their pipeline aggregates many packets and uses metadata about Google’s front-end infrastructure that we can’t reproduce by simply sniffing packets locally without decrypting. Thus, we’re missing the categorical hints that tell the model it’s “google-docs” vs “blogger.”
+
+    - Background traffic is indeed a problem: the researchers removed generic background/idle flows prior to training, but on your laptop we’re capturing every QUIC connection (system updates, telemetry, background Chrome sync). Those flows have no feature parity with the curated dataset, so the model treats them as the nearest known class (often “blogger” or “default-background”).
+
+    ## 12/2
+    **Sequence-only model evaluation**
+    - Added `--sequence-only` to `scripts/train_pytorch.py` / `scripts/eval_pytorch.py` so training and evaluation can zero out tabular + categorical inputs, matching the FastAPI/agent pipeline that only emits the 3×30 packet sequences.
+    - Evaluated the new checkpoint against the cached test split using `scripts/eval_pytorch.py`; the chunked manifest tests still score **78.69% accuracy and 0.6839 macro F1** (see `results/eval4.txt`), so the CNN retains reasonable discriminative power when the tabular branch is blanked out.
+    - The live Mac agent still predicts a single class (e.g., “gmail”) with nearly 1.0 confidence because real captures remain far from CESNET’s curated tabular/statistical distribution: we continue to miss PPI/histogram counts, ASN/SNI/UA embeddings, and the dataset’s cleaned background filtering, so the deployment still runs into feature-drift collapse even with the sequence-only checkpoint. Demoing the CNN therefore requires either replaying cached CESNET flows or extracting the same tabular features on the capture host rather than relying on the minimalist sequence-only stream.
+
+    ---
+
+Here’s a focused comparison of feature engineering for the two pipelines.
+
+**XGBoost (tabular-only, Dask + cuDF)**
+- Source columns: `RAW_INPUT_COLUMNS` in load_day.py (duration/bytes/packets/PPI stats, end-reason one-hots, ASN, ports, protocol, QUIC_VERSION, timestamps, 4 histograms).
+- Histogram handling: each of the four `PHIST_*` arrays is expanded into 8 numeric bins (`*_BIN_0..7`), then the original histogram columns are dropped.
+- Derived aggregates/ratios (`DERIVED_FEATURES`): totals (`TOTAL_BYTES`, `TOTAL_PACKETS`), directionality ratios (`BYTES_RATIO`, `PACKETS_RATIO`, balances), per-direction means (`MEAN_PACKET_SIZE_*`), throughput (`BYTES_PER_SECOND`, `PACKETS_PER_SECOND`), density/roundtrip ratios (`PPI_DENSITY`, `PPI_ROUNDTRIP_RATIO`), logs of totals, and timestamp features (`START_HOUR`, `START_MINUTE_OF_DAY`, `START_DAY_OF_WEEK`, `IS_WEEKEND`, `DURATION_FROM_TIMESTAMPS`).
+- QUIC version: factorized to an integer code (`QUIC_VERSION_CODE`); treated as numeric.
+- Final feature set: `FEATURE_COLUMNS = BASE_FEATURE_COLUMNS + DERIVED_FEATURES + HISTOGRAM_FEATURES`, all cast to float32; labels are categorical codes of `APP`.
+- Purpose: hand-crafted, human-interpretable statistics that summarize flow volume, symmetry, timing, and basic protocol/meta info; no packet-level sequence information.
+
+**CNN (hybrid sequence + tabular + version embedding)**
+- Source columns: `SplitCacheBuilder.columns` in train_pytorch.py (label `APP`, raw `PPI` sequence JSON, the 4 histograms, durations/bytes/packets/PPI stats, protocol, src/dst ports, `QUIC_VERSION`).
+- Sequence branch:
+  - `PPI` parsed as a triplet of lists (inter-packet times, directions, sizes); each is padded/truncated to `max_seq_len` (default 30).
+  - Inter-packet times are `log1p`-scaled; directions and sizes kept as-is; stacked into a 3×T tensor.
+  - Per-channel mean/std computed over valid lengths during cache build; later standardized per chunk.
+- Tabular branch (static features):
+  - Derived in `build_tabular_features_value`: duration; log1p of fwd, rev, and total bytes/packets; PPI counts/duration/roundtrips; protocol; normalized ports (0–1); plus 8-bin log1p histograms for each of the 4 `PHIST_*` fields.
+  - Mean/std computed on the training split caches; applied per chunk at load time.
+- QUIC version: mapped to an index (padding 0) and fed through a learnable embedding (`version_embed_dim`, default 16); concatenated to the tabular vector before the MLP.
+- Labels: integer-coded `APP`; class counts tracked for optional weighting.
+- Purpose: retain fine-grained temporal dynamics via the sequence branch while still using coarse flow-level statistics; learnable embedding lets the model capture version-specific patterns beyond a hashed numeric code.
+
+**Key differences**
+- Modalities: CNN uses both sequence data (packet timing/direction/size traces) and tabular summaries; XGBoost uses tabular only.
+- Histogram treatment: both expand to 8 bins, but CNN log-scales bins; XGBoost keeps raw values (float32).
+- QUIC version: CNN learns an embedding (padding-aware); XGBoost hashes/factorizes to an integer code (no learned embedding).
+- Normalization: CNN standardizes per-channel (sequence) and per-feature (tabular) with train-split mean/std; XGBoost relies on tree robustness to scale and does not normalize.
+- Crafted ratios: XGBoost has richer hand-crafted ratios/balances and timestamp-derived features (hour/weekday/weekend, duration from timestamps); CNN’s tabular set is leaner (no timestamp features, fewer ratios) because sequence data carries temporal signal.
+- Sequence signal: only the CNN captures order/spacing of packets; XGBoost cannot see that signal, so it depends on aggregated stats.
+
+**When one may be better**
+- CNN advantages: learns directly from packet-level dynamics (bursts, direction flips, timing patterns), and can exploit version embeddings; likely better when behavior is encoded in short-term sequence shapes or version-specific quirks.
+- XGBoost advantages: simpler preprocessing, faster to train/tune, robust to missing sequence data, and benefits when aggregated ratios and calendar effects dominate; easier to interpret feature importances.
+- Data/ops considerations: CNN needs cache building (sequence parsing, normalization) and GPU-friendly training; XGBoost scales via Dask across GPUs and skips heavy normalization but won’t benefit from packet-order information.

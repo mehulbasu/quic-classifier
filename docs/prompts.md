@@ -138,3 +138,58 @@ Refactor the training loop to implement **"Sequential Chunk Training"**. The sys
     * Preserve the existing `HybridCNN` (1D CNN + MLP) exactly as is.
 
 Generate the complete, runnable Python script.
+
+---
+
+Prompt for demo client/server is listed in demo/generate_sample.py.
+
+I have been running tests with the updated client and server but now I'm facing a new issue. I have tested with my browser on youtube, gmail, google docs where i've confirmed that it used http3 each time. still, all kinds of traffic is being classified as 'blogger' which is the site blogger.com, which I have never visited. I have attached a .csv file which is a report of my recent run where I was on google docs the entire time. I know google-docs and google-fonts are supported class labels in the dataset. Why is this issue happening? 
+- One potential issue that I can think of is that there is a discrepancy between the cesnet-quic22 dataset and our input data. To gather the flows for an identified service, the researchers performed a lot of filtering. Please look into the paper "CESNET-QUIC22: A large one-month QUIC
+network traﬃc dataset from backbone lines" for further details.
+- is background traffic hampering the model's predictions?
+- is it incorrectly using service number identifiers to classify flows?
+please investigate this to the fullest extent, particularly focusing on the differences between the research dataset and our input data.
+
+---
+
+Act as a Python Engineer. I need to pivot my QUIC traffic classification demo from a "Live Sniffer" approach to a "Trace Replay" approach to solve a domain shift issue.
+
+**The Goal:**
+Create two new scripts to simulate traffic by replaying valid, pre-recorded traces from the validation dataset. Do **not** modify the existing `server_api.py` or `mac_agent.py`. We are also reverting back to the full model input structure (including tabular data).
+
+### Task 1: Data Extraction Script (`extract_demo_traces.py`)
+Write a script to run on the **Server (Linux)**.
+1.  **Input:** Look for PyTorch cache files (`.pt`) in `datasets/cache_pytorch`.
+2.  **Metadata:** Load `datasets/cache_pytorch/train/meta.json` to get the mapping from Integer IDs to Class Names (List of strings).
+3.  **Filtering:** We want to show off specific, recognizable apps. Filter the dataset to find 10-20 samples for **EACH** of these target classes:
+    - `youtube`
+    - `netflix`
+    - `spotify`
+    - `instagram`
+    - `microsoft-outlook`
+    - `gmail`
+    - `google-www`
+4.  **Output:** Save these samples to a file named `demo_traces.json`.
+
+### Task 2: Replay Client Script (`mac_agent_replay.py`)
+Write a script to run on the **Client (Mac)** using `streamlit`.
+1.  **Setup:** Load `demo_traces.json`.
+2.  **UI Layout:**
+    - Sidebar: A slider for "Replay Speed" (0.1s to 2s).
+    - Main Area: A "Start Replay" button and a "Stop" button.
+    - Data Display: A dynamic table showing the history of predictions.
+3.  **The Loop:**
+    - When "Start" is clicked, loop through the traces (randomly or sequentially).
+    - **Payload:** Construct a JSON payload using *only* the feature keys (`sequences`, `tabular`, `sni_idx`, `ua_idx`, `version_idx`). **Do not** send `ground_truth` to the server.
+    - **Request:** POST the payload to `http://localhost:8000/predict`.
+    - **Visualization:**
+        - Add a row to the table: `Timestamp | True Label (from JSON) | Predicted Label (from Server) | Confidence | Latency`.
+        - Highlight the row in **Green** if True Label == Predicted Label, **Red** otherwise.
+    - **Delay:** Sleep for the duration set by the slider.
+
+**Technical Constraints:**
+- Use `torch.load` in the extractor script.
+- Use `requests` and `streamlit` in the client script.
+- Ensure the keys match exactly so the existing FastAPI server validates them correctly.
+
+Generate the code for `extract_demo_traces.py` and `mac_agent_replay.py`.
