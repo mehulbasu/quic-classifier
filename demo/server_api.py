@@ -173,7 +173,7 @@ def _run_single_inference(sample_path: Path) -> None:
 
 def _parse_cli() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Test HybridCNN inference on a sample payload")
-    parser.add_argument("--sample", type=str, default="demo/golden_sample.json", help="Path to sample JSON payload")
+    parser.add_argument("--sample", type=str, default="demo/golden-sample.json", help="Path to sample JSON payload")
     return parser.parse_args()
 
 
