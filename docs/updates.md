@@ -84,3 +84,41 @@ The 75.84% accuracy on a massively imbalanced 105-class problem demonstrates tha
     - Added `--sequence-only` to `scripts/train_pytorch.py` / `scripts/eval_pytorch.py` so training and evaluation can zero out tabular + categorical inputs, matching the FastAPI/agent pipeline that only emits the 3×30 packet sequences.
     - Evaluated the new checkpoint against the cached test split using `scripts/eval_pytorch.py`; the chunked manifest tests still score **78.69% accuracy and 0.6839 macro F1** (see `results/eval4.txt`), so the CNN retains reasonable discriminative power when the tabular branch is blanked out.
     - The live Mac agent still predicts a single class (e.g., “gmail”) with nearly 1.0 confidence because real captures remain far from CESNET’s curated tabular/statistical distribution: we continue to miss PPI/histogram counts, ASN/SNI/UA embeddings, and the dataset’s cleaned background filtering, so the deployment still runs into feature-drift collapse even with the sequence-only checkpoint. Demoing the CNN therefore requires either replaying cached CESNET flows or extracting the same tabular features on the capture host rather than relying on the minimalist sequence-only stream.
+
+    ---
+
+Here’s a focused comparison of feature engineering for the two pipelines.
+
+**XGBoost (tabular-only, Dask + cuDF)**
+- Source columns: `RAW_INPUT_COLUMNS` in load_day.py (duration/bytes/packets/PPI stats, end-reason one-hots, ASN, ports, protocol, QUIC_VERSION, timestamps, 4 histograms).
+- Histogram handling: each of the four `PHIST_*` arrays is expanded into 8 numeric bins (`*_BIN_0..7`), then the original histogram columns are dropped.
+- Derived aggregates/ratios (`DERIVED_FEATURES`): totals (`TOTAL_BYTES`, `TOTAL_PACKETS`), directionality ratios (`BYTES_RATIO`, `PACKETS_RATIO`, balances), per-direction means (`MEAN_PACKET_SIZE_*`), throughput (`BYTES_PER_SECOND`, `PACKETS_PER_SECOND`), density/roundtrip ratios (`PPI_DENSITY`, `PPI_ROUNDTRIP_RATIO`), logs of totals, and timestamp features (`START_HOUR`, `START_MINUTE_OF_DAY`, `START_DAY_OF_WEEK`, `IS_WEEKEND`, `DURATION_FROM_TIMESTAMPS`).
+- QUIC version: factorized to an integer code (`QUIC_VERSION_CODE`); treated as numeric.
+- Final feature set: `FEATURE_COLUMNS = BASE_FEATURE_COLUMNS + DERIVED_FEATURES + HISTOGRAM_FEATURES`, all cast to float32; labels are categorical codes of `APP`.
+- Purpose: hand-crafted, human-interpretable statistics that summarize flow volume, symmetry, timing, and basic protocol/meta info; no packet-level sequence information.
+
+**CNN (hybrid sequence + tabular + version embedding)**
+- Source columns: `SplitCacheBuilder.columns` in train_pytorch.py (label `APP`, raw `PPI` sequence JSON, the 4 histograms, durations/bytes/packets/PPI stats, protocol, src/dst ports, `QUIC_VERSION`).
+- Sequence branch:
+  - `PPI` parsed as a triplet of lists (inter-packet times, directions, sizes); each is padded/truncated to `max_seq_len` (default 30).
+  - Inter-packet times are `log1p`-scaled; directions and sizes kept as-is; stacked into a 3×T tensor.
+  - Per-channel mean/std computed over valid lengths during cache build; later standardized per chunk.
+- Tabular branch (static features):
+  - Derived in `build_tabular_features_value`: duration; log1p of fwd, rev, and total bytes/packets; PPI counts/duration/roundtrips; protocol; normalized ports (0–1); plus 8-bin log1p histograms for each of the 4 `PHIST_*` fields.
+  - Mean/std computed on the training split caches; applied per chunk at load time.
+- QUIC version: mapped to an index (padding 0) and fed through a learnable embedding (`version_embed_dim`, default 16); concatenated to the tabular vector before the MLP.
+- Labels: integer-coded `APP`; class counts tracked for optional weighting.
+- Purpose: retain fine-grained temporal dynamics via the sequence branch while still using coarse flow-level statistics; learnable embedding lets the model capture version-specific patterns beyond a hashed numeric code.
+
+**Key differences**
+- Modalities: CNN uses both sequence data (packet timing/direction/size traces) and tabular summaries; XGBoost uses tabular only.
+- Histogram treatment: both expand to 8 bins, but CNN log-scales bins; XGBoost keeps raw values (float32).
+- QUIC version: CNN learns an embedding (padding-aware); XGBoost hashes/factorizes to an integer code (no learned embedding).
+- Normalization: CNN standardizes per-channel (sequence) and per-feature (tabular) with train-split mean/std; XGBoost relies on tree robustness to scale and does not normalize.
+- Crafted ratios: XGBoost has richer hand-crafted ratios/balances and timestamp-derived features (hour/weekday/weekend, duration from timestamps); CNN’s tabular set is leaner (no timestamp features, fewer ratios) because sequence data carries temporal signal.
+- Sequence signal: only the CNN captures order/spacing of packets; XGBoost cannot see that signal, so it depends on aggregated stats.
+
+**When one may be better**
+- CNN advantages: learns directly from packet-level dynamics (bursts, direction flips, timing patterns), and can exploit version embeddings; likely better when behavior is encoded in short-term sequence shapes or version-specific quirks.
+- XGBoost advantages: simpler preprocessing, faster to train/tune, robust to missing sequence data, and benefits when aggregated ratios and calendar effects dominate; easier to interpret feature importances.
+- Data/ops considerations: CNN needs cache building (sequence parsing, normalization) and GPU-friendly training; XGBoost scales via Dask across GPUs and skips heavy normalization but won’t benefit from packet-order information.
