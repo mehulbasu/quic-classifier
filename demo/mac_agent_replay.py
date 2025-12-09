@@ -16,7 +16,7 @@ import streamlit as st
 
 TRACE_PATH = Path(__file__).resolve().parent / "demo_traces.json"
 SERVER_URL = "http://localhost:8000/predict"
-FEATURE_KEYS = ("sequences", "tabular", "sni_idx", "ua_idx", "version_idx")
+FEATURE_KEYS = ("sequences", "tabular", "version_idx")
 MAX_HISTORY = 200
 
 
@@ -83,7 +83,7 @@ def replay_once(replay_delay: float) -> None:
 
     st.session_state.trace_index = (idx + 1) % len(traces)
     time.sleep(replay_delay)
-    st.experimental_rerun()
+    st.rerun()
 
 
 def render_history_table() -> None:

@@ -17,6 +17,9 @@ TARGET_LABELS: List[str] = [
     "microsoft-outlook",
     "gmail",
     "google-www",
+    "facebook-web",
+    "google-docs",
+    "google-photos",
 ]
 
 
@@ -75,8 +78,6 @@ def collect_traces(
         payload = torch.load(chunk_path, map_location="cpu")
         sequences: torch.Tensor = payload["sequences"]
         tabular: torch.Tensor = payload["tabular"]
-        sni_idx: torch.Tensor = payload["sni_idx"]
-        ua_idx: torch.Tensor = payload["ua_idx"]
         version_idx: torch.Tensor = payload["version_idx"]
         labels: torch.Tensor = payload["labels"]
 
@@ -94,8 +95,6 @@ def collect_traces(
                 "ground_truth": label_name,
                 "sequences": sequences[idx].tolist(),
                 "tabular": tabular[idx].tolist(),
-                "sni_idx": int(sni_idx[idx].item()),
-                "ua_idx": int(ua_idx[idx].item()),
                 "version_idx": int(version_idx[idx].item()),
             }
             bucket.append(sample)

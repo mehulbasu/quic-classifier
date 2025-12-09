@@ -49,11 +49,7 @@ def _load_model(checkpoint_path: Path, meta: Dict[str, Any], device: torch.devic
         seq_hidden=saved_args["seq_hidden"],
         mlp_hidden=saved_args["mlp_hidden"],
         dropout=saved_args["dropout"],
-        sni_embed_dim=saved_args["sni_embed_dim"],
-        ua_embed_dim=saved_args["ua_embed_dim"],
         version_embed_dim=saved_args["version_embed_dim"],
-        sni_hash_size=saved_args["sni_hash_size"],
-        ua_hash_size=saved_args["ua_hash_size"],
     )
     num_versions = max(len(meta.get("version_values", [])), 1)
     model = HybridCNN(
@@ -89,8 +85,6 @@ class _ServerState:
     def predict(self, payload: "PredictRequest") -> Dict[str, Any]:
         seq = torch.tensor(payload.sequences, dtype=torch.float32, device=self.device).unsqueeze(0)
         tab = torch.tensor(payload.tabular, dtype=torch.float32, device=self.device).unsqueeze(0)
-        sni = torch.tensor([payload.sni_idx], dtype=torch.long, device=self.device)
-        ua = torch.tensor([payload.ua_idx], dtype=torch.long, device=self.device)
         version = torch.tensor([payload.version_idx], dtype=torch.long, device=self.device)
 
         orig_tab_dim = tab.shape[1]
@@ -114,7 +108,7 @@ class _ServerState:
         tab = (tab - self.tab_mean) / self.tab_std
 
         with torch.no_grad():
-            logits = self.model(seq, tab, sni, ua, version)
+            logits = self.model(seq, tab, version)
             probs = F.softmax(logits, dim=1)
             confidence, pred_idx = torch.max(probs, dim=1)
 
@@ -134,8 +128,6 @@ app = FastAPI(title="HybridCNN QUIC Inference API", version="1.0")
 class PredictRequest(BaseModel):
     sequences: List[List[float]] = Field(..., description="3x30 tensor represented as nested list")
     tabular: List[float] = Field(..., description="Tabular feature vector")
-    sni_idx: int
-    ua_idx: int
     version_idx: int
 
     @validator("sequences")
@@ -157,12 +149,10 @@ def predict(request: PredictRequest) -> PredictResponse:
     seq_channels = len(request.sequences)
     seq_len = len(request.sequences[0]) if request.sequences else 0
     LOGGER.info(
-        "Received request seq_shape=[%s,%s] tab_dim=%s sni=%s ua=%s version=%s",
+        "Received request seq_shape=[%s,%s] tab_dim=%s version=%s",
         seq_channels,
         seq_len,
         len(request.tabular),
-        request.sni_idx,
-        request.ua_idx,
         request.version_idx,
     )
     try:
