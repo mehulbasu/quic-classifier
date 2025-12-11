@@ -1,0 +1,104 @@
+scripts.train_decision_tree
+Training samples: 1000000
+Unique classes: 105
+Evaluation samples: 1000000
+Accuracy: 0.6112
+Macro F1: 0.3676
+Classification report (top 10 classes by support):
+google-www                prec=0.596 rec=0.572 f1=0.583 support=71636
+google-ads                prec=0.404 rec=0.493 f1=0.444 support=69748
+google-services           prec=0.752 rec=0.769 f1=0.760 support=60512
+google-play               prec=0.612 rec=0.681 f1=0.644 support=55311
+google-gstatic            prec=0.818 rec=0.713 f1=0.762 support=51278
+google-background         prec=0.416 rec=0.348 f1=0.379 support=46330
+youtube                   prec=0.498 rec=0.485 f1=0.491 support=44735
+google-fonts              prec=0.591 rec=0.694 f1=0.638 support=42650
+instagram                 prec=0.775 rec=0.783 f1=0.779 support=41964
+default-background        prec=0.433 rec=0.542 f1=0.481 support=37699
+
+scripts.train_random_forest
+Loading data from Parquet: datasets/training/flows-20221121.parquet
+Preparing feature matrix and labels.
+Training samples: 1000000
+Unique classes: 105
+Training time: 96.3s
+Loading data from Parquet: datasets/training/flows-20221123.parquet
+Evaluation samples: 1000000
+Accuracy: 0.6598
+Macro F1: 0.4831
+Classification report (top 10 classes by support):
+google-www                prec=0.842 rec=0.530 f1=0.650 support=71636
+google-ads                prec=0.666 rec=0.412 f1=0.509 support=69748
+google-services           prec=0.897 rec=0.792 f1=0.841 support=60512
+google-play               prec=0.736 rec=0.734 f1=0.735 support=55311
+google-gstatic            prec=0.917 rec=0.724 f1=0.809 support=51278
+google-background         prec=0.660 rec=0.376 f1=0.479 support=46330
+youtube                   prec=0.690 rec=0.531 f1=0.600 support=44735
+google-fonts              prec=0.677 rec=0.703 f1=0.689 support=42650
+instagram                 prec=0.852 rec=0.807 f1=0.829 support=41964
+default-background        prec=0.868 rec=0.142 f1=0.245 support=37699
+
+scripts.train_random_forest_cuml
+Training samples: 1000000
+Unique classes: 105
+Parameters: n_estimators=400 max_depth=16 min_samples_leaf=10 n_bins=64 n_streams=8
+Training time (GPU): 29.1s
+Evaluation samples: 1000000
+Accuracy: 0.638
+Macro F1: 0.397
+Classification report (top 10 classes by support):
+google-www                prec=0.582 rec=0.591 f1=0.587 support=71636
+google-ads                prec=0.378 rec=0.577 f1=0.456 support=69748
+google-services           prec=0.811 rec=0.784 f1=0.797 support=60512
+google-play               prec=0.572 rec=0.745 f1=0.647 support=55311
+google-gstatic            prec=0.859 rec=0.704 f1=0.774 support=51278
+google-background         prec=0.496 rec=0.304 f1=0.377 support=46330
+youtube                   prec=0.598 rec=0.497 f1=0.543 support=44735
+google-fonts              prec=0.547 rec=0.714 f1=0.619 support=42650
+instagram                 prec=0.802 rec=0.844 f1=0.822 support=41964
+default-background        prec=0.425 rec=0.614 f1=0.503 support=37699
+
+scripts.train_xgboost
+Model parameters:
+  tree_method=hist
+  device=cuda
+  objective=multi:softprob
+  eval_metric=mlogloss
+  max_depth=12
+  max_bin=150
+  learning_rate=0.1
+  subsample=0.8
+  colsample_bytree=0.8
+  reg_lambda=1.0
+  seed=42
+  verbosity=2
+  n_estimators=400
+Accuracy: 0.7584
+Macro F1: 0.6553
+Classification report (top 10 classes by support):
+google-www                prec=0.732 rec=0.743 f1=0.737 support=577603
+google-ads                prec=0.572 rec=0.666 f1=0.616 support=568974
+google-services           prec=0.876 rec=0.866 f1=0.871 support=486841
+google-play               prec=0.754 rec=0.823 f1=0.787 support=440465
+google-gstatic            prec=0.875 rec=0.804 f1=0.838 support=418454
+google-background         prec=0.600 rec=0.528 f1=0.562 support=360702
+youtube                   prec=0.713 rec=0.667 f1=0.689 support=359861
+google-fonts              prec=0.657 rec=0.732 f1=0.692 support=356260
+instagram                 prec=0.880 rec=0.888 f1=0.884 support=325771
+spotify                   prec=0.815 rec=0.860 f1=0.837 support=299901
+
+scripts.train_pytorch
+Overall accuracy: 0.8952
+Macro F1: 0.7897
+Classification report (top 10 classes by support):
+Service	acc	f1	support
+google-www	0.9287	0.8776	7675874
+google-ads	0.9001	0.8427	7208589
+google-services	0.9654	0.9679	6871469
+google-play	0.9638	0.9613	6136568
+google-gstatic	0.8732	0.9061	5543479
+youtube	0.8994	0.8928	5197257
+instagram	0.9665	0.9613	5179999
+google-background	0.7544	0.7952	4822433
+google-fonts	0.741	0.7429	4469294
+default-background	0.7946	0.7865	4433272

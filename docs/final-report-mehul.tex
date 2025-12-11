@@ -1,0 +1,302 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Template for USENIX papers.
+%
+% History:
+%
+% - TEMPLATE for Usenix papers, specifically to meet requirements of
+%   USENIX '05. originally a template for producing IEEE-format
+%   articles using LaTeX. written by Matthew Ward, CS Department,
+%   Worcester Polytechnic Institute. adapted by David Beazley for his
+%   excellent SWIG paper in Proceedings, Tcl 96. turned into a
+%   smartass generic template by De Clarke, with thanks to both the
+%   above pioneers. Use at your own risk. Complaints to /dev/null.
+%   Make it two column with no page numbering, default is 10 point.
+%
+% - Munged by Fred Douglis <douglis@research.att.com> 10/97 to
+%   separate the .sty file from the LaTeX source template, so that
+%   people can more easily include the .sty file into an existing
+%   document. Also changed to more closely follow the style guidelines
+%   as represented by the Word sample file.
+%
+% - Note that since 2010, USENIX does not require endnotes. If you
+%   want foot of page notes, don't include the endnotes package in the
+%   usepackage command, below.
+% - This version uses the latex2e styles, not the very ancient 2.09
+%   stuff.
+%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\documentclass[letterpaper,twocolumn,10pt]{article}
+\usepackage{usenix-2020-09}
+
+% to be able to draw some self-contained figs
+\usepackage{tikz}
+\usepackage{amsmath}
+
+% inlined bib file
+\usepackage{filecontents}
+
+%-------------------------------------------------------------------------------
+\begin{filecontents}{\jobname.bib}
+%-------------------------------------------------------------------------------
+@INPROCEEDINGS{aceto17,
+  author={Aceto, Giuseppe and Ciuonzo, Domenico and Montieri, Antonio and Pescape, Antonio},
+  booktitle={GLOBECOM 2017 - 2017 IEEE Global Communications Conference}, 
+  title={Traffic Classification of Mobile Apps through Multi-Classification}, 
+  year={2017},
+  volume={},
+  number={},
+  pages={1-6},
+  doi={10.1109/GLOCOM.2017.8254059}}
+
+@INPROCEEDINGS{tong18,
+  author={Tong, Van and Tran, Hai Anh and Souihi, Sami and Mellouk, Abdelhamid},
+  booktitle={2018 IEEE Global Communications Conference (GLOBECOM)}, 
+  title={A Novel QUIC Traffic Classifier Based on Convolutional Neural Networks}, 
+  year={2018},
+  volume={},
+  number={},
+  pages={1-6},
+  keywords={Google;Feature extraction;Convolutional neural networks;Payloads;Protocols;Neurons;Streaming media},
+  doi={10.1109/GLOCOM.2018.8647128}}
+
+@INPROCEEDINGS{luxemburk23,
+  author={Luxemburk, Jan and Hynek, Karel and Čejka, Tomáš},
+  booktitle={2023 7th Network Traffic Measurement and Analysis Conference (TMA)}, 
+  title={Encrypted traffic classification: the QUIC case}, 
+  year={2023},
+  volume={},
+  number={},
+  pages={1-10},
+  keywords={Transport protocols;Analytical models;Web services;Telecommunication traffic;Time measurement;Robustness;Cryptography;Traffic classification;QUIC;Deep learning;Encrypted traffic;Computer network},
+  doi={10.23919/TMA58422.2023.10199052}}
+
+@article{cesnet,
+title = {CESNET-QUIC22: A large one-month QUIC network traffic dataset from backbone lines},
+journal = {Data in Brief},
+volume = {46},
+pages = {108888},
+year = {2023},
+issn = {2352-3409},
+doi = {https://doi.org/10.1016/j.dib.2023.108888},
+url = {https://www.sciencedirect.com/science/article/pii/S2352340923000069},
+author = {Jan Luxemburk and Karel Hynek and Tomáš Čejka and Andrej Lukačovič and Pavel Šiška}
+}
+
+\end{filecontents}
+
+%-------------------------------------------------------------------------------
+\begin{document}
+%-------------------------------------------------------------------------------
+
+%don't want date printed
+\date{}
+
+% make title bold and 14 pt font (Latex default is non-bold, 16 pt)
+\title{\Large \bf Statistical Fingerprinting: \\
+An ML-Based Approach for Classifying Encrypted QUIC Traffic}
+
+%for single author (just remove % characters)
+\author{
+{\rm Mehul Basu}\\
+University of Wisconsin-Madison
+% copy the following lines to add more authors
+% \and
+% {\rm Name}\\
+%Name Institution
+} % end author
+
+\maketitle
+
+%-------------------------------------------------------------------------------
+\section{Introduction}
+%-------------------------------------------------------------------------------
+Traditional network traffic classification has long relied on inspecting well-known port numbers and protocol fields in packet headers, or even by inspecting the payload itself. However, this methodology is becoming increasingly obsolete. The widespread adoption of TLS encryption has concentrated a diverse mix of application traffic—from web browsing and video streaming to API calls and file transfers—onto a single port, TCP/443.
+
+The emergence and rapid adoption of the QUIC protocol further complicate this landscape. Built on top of UDP, QUIC provides its own encrypted transport and is the foundation of HTTP/3. As major content providers like Google and Meta transition their services to QUIC, a significant and growing portion of internet traffic now consists of encrypted UDP flows. An operator who sees a QUIC flow can't tell if it's a user watching YouTube, browsing Google Search, or using Google Drive. This ambiguity presents a significant challenge for network monitoring, security analysis, and Quality of Service (QoS) management.
+
+This project addresses the problem of classifying encrypted network traffic with a specific focus on QUIC. The central research question is: \textbf{How well can we use statistical, flow-level features to accurately classify the underlying application of an encrypted QUIC flow?}
+
+%-------------------------------------------------------------------------------
+\section{Background}
+%-------------------------------------------------------------------------------
+The field of encrypted traffic classification has evolved significantly to counter the limitations of port-based analysis. Early work by Aceto et al.~\cite{aceto17} demonstrated the viability of using statistical features for classifying mobile application traffic. They successfully used flow-level statistics such as packet sizes and inter-arrival times to train machine learning models, establishing that behavioral "fingerprints" can effectively identify applications even without access to the payload.
+
+With the advent of QUIC, research has shifted to address the specific challenges posed by this new protocol. Tong et al.~\cite{tong18} presented an early approach using Convolutional Neural Networks (CNNs) to classify QUIC traffic for Google services. Their work showed that deep learning models could achieve high accuracy but often at the cost of model interpretability and significant computational overhead.
+
+More recently, the work of Luxemburk et al.~\cite{luxemburk23} provides a comprehensive analysis of the QUIC classification problem using more traditional machine learning models. Their work highlights the continued relevance of statistical fingerprinting and provides a strong benchmark for current research.
+
+%-------------------------------------------------------------------------------
+\section{Dataset: CESNET-QUIC22}
+%-------------------------------------------------------------------------------
+To address the challenge of classifying encrypted QUIC traffic, we utilized the CESNET-QUIC22 dataset ~\cite{cesnet}. This dataset was collected on the Czech Education and Scientific Network (CESNET) using monitoring probes deployed at the network perimeter. The collection pipeline involved a flow collector responsible for QUIC flow filtering, processing, and anonymization.
+
+Establishing ground truth for encrypted traffic is inherently difficult. The dataset creators employed active probing and certificate allow-lists to verify services, while also capturing background traffic to facilitate evaluation in open-world scenarios. The complete dataset comprises approximately 153 million flows distributed across 28 files, spanning a four-week collection period. The dataset features are organized into three distinct tiers:
+\begin{itemize}
+\item \textbf{Metadata:} Basic flow identifiers and timestamps that are reliably collectible by any passive observer, even with QUIC encryption.
+\item \textbf{Enrichment Data:} Deep-inspection features derived from the payload. Most of these are typically hidden in real-world encrypted traffic but can be decrypted with a slow and computationally expensive process. These were excluded from the CNN model for compatibility with real-time classification. However, the tree-based models used the destination ASN and flow end reasons.
+\item \textbf{Statistical Fingerprints:} The core features for our classification task. These include sequence and histogram data capturing packet sizes, inter-arrival timing, burstiness, and inferred round-trip times. These features remain fully observable despite encryption and encode the behavioral patterns necessary for machine learning.
+\end{itemize}
+\begin{table*}[!t]
+\centering
+\caption{Overall performance across all models (training samples shown for scale).}
+\label{tab:overall}
+\begin{tabular}{lrrr}
+\hline
+    \textbf{Model} & \textbf{Train Samples} & \textbf{Acc.} & \textbf{Macro F1} \\
+\hline
+Decision Tree (sklearn) & 1{,}000{,}000 & 0.6112 & 0.3676 \\
+Random Forest (sklearn) & 1{,}000{,}000 & 0.6598 & 0.4831 \\
+Random Forest (cuML) & 1{,}000{,}000 & 0.6380 & 0.3970 \\
+XGBoost (Dask + GPU) & 25{,}421{,}273 & 0.7584 & 0.6553 \\
+Hybrid CNN (PyTorch DDP) & 40{,}851{,}622 & \textbf{0.8952} & \textbf{0.7897} \\
+\hline
+\end{tabular}
+\end{table*}
+%-------------------------------------------------------------------------------
+\section{Approach}
+%-------------------------------------------------------------------------------
+Our approach followed an iterative progression, moving from simple CPU-bound models to distributed GPU-accelerated ensembles, and finally to deep learning architectures. This evolution was driven by the need to balance model accuracy with the computational constraints of processing high-dimensional network data.
+
+\subsection{Scikit-learn Models}
+%-----------------------------------
+We established a baseline using the Scikit-learn library. The initial experiment utilized a Decision Tree classifier trained on 1 million samples from a single day and tested on a separate day from the same week. This phase served primarily as a sanity check for the data pipeline, achieving approximately 61\% accuracy with a macro F1 score of 0.36.
+
+Subsequently, we implemented a Random Forest classifier to reduce variance and smooth out noise in the dataset. While this improved accuracy to roughly 66\% and the macro F1 score to 0.48—indicating better identification of minority classes—the approach remained purely CPU-bound, limiting our ability to scale to the full dataset.
+
+\subsection{NVIDIA Rapids cuML}
+%-----------------------------------
+To address the scaling limitations of Scikit-learn, we migrated to NVIDIA Rapids cuML, a high-performance library mirroring the Scikit-learn API but optimized for GPU acceleration. This transition yielded an immediate 60\% reduction in training time, dropping from 96 seconds to 35 seconds. However, we observed a slight decrease in accuracy and F1 scores, likely attributable to architectural differences in tree construction between the libraries.
+
+The primary bottleneck encountered with this approach was GPU memory (VRAM). The cuML implementation requires the entire feature matrix to reside in the VRAM of a single GPU. With 16GB accelerators, we faced Out-Of-Memory (OOM) errors when attempting to train on more than three days of data.
+
+\subsection{Distributed XGBoost}
+%-----------------------------------
+To overcome single-GPU memory limits, we implemented Distributed XGBoost integrated with Dask. Unlike Random Forests, which build trees independently, Gradient Boosting builds trees sequentially—each new tree corrects the residual errors of the ensemble so far. Dask allowed us to scale this process across multiple GPUs by streaming data partitions on demand using GPU-native cuDF dataframes.
+
+Our implementation leverages a \texttt{LocalCUDACluster} with configurable per-worker memory limits and uses the \texttt{DaskQuantileDMatrix} interface for memory-efficient histogram construction. The training loop employs the \texttt{hist} tree method with GPU acceleration, supporting configurable histogram bin counts, tree depth, and regularization parameters.
+
+Initial training on 25 million samples (approximately 3 days of backbone traffic) achieved a baseline accuracy of 70.26\% and a macro F1 of 0.61. We focused on hyperparameter tuning, specifically balancing tree depth against histogram bin size. Given the need to classify 105 distinct applications, deeper trees were required to capture subtle decision boundaries. However, increasing histogram resolution to support this depth drastically increased the memory footprint. While we boosted accuracy to 75.84\%, the combination of high-resolution histograms and gradient history eventually saturated the VRAM, limiting further scaling.
+
+\subsection{Hybrid CNN}
+%-----------------------------------
+To decouple dataset size from GPU memory constraints, we developed a Hybrid Convolutional Neural Network (CNN). We implemented a sequential chunk training pipeline where Parquet files are converted into pre-processed PyTorch tensors and saved to disk. During training, the system loads a single chunk, updates model weights via Distributed Data Parallel (DDP) across multiple GPUs, and immediately flushes the memory, keeping per-GPU VRAM usage constant regardless of total dataset size. The architecture consists of two parallel branches:
+\begin{itemize}
+\item \textbf{Sequence Branch:} Processes the first 30 packets of a flow as a $3 \times 30$ tensor (channels: inter-packet times, directions, and log-scaled sizes). The branch applies three layers of 1D convolution (128 $\rightarrow$ 256 $\rightarrow$ 256 filters with kernel sizes 5, 3, 3), each followed by batch normalization and ReLU activation. An adaptive max-pooling layer reduces the temporal dimension to a single value per filter, producing a 256-dimensional feature vector. This design allows the model to learn temporal patterns—such as video buffering bursts or handshake sequences—that aggregate statistics necessarily obscure.
+\item \textbf{Static Branch:} Concatenates the normalized tabular feature vector with a learned QUIC version embedding. The combined input passes through a two-layer MLP (hidden dimension 512) with batch normalization, ReLU activations, and dropout (0.3) to produce a 512-dimensional embedding.
+\end{itemize}
+These embeddings are fused via concatenation before a final two-layer MLP head (768 $\rightarrow$ 512 $\rightarrow$ $C$) outputs class logits, effectively combining the temporal precision of the first 30 packets with the statistical breadth of the full flow summary.
+
+Training employs mixed-precision via PyTorch's \texttt{amp} module, label smoothing (default 0.05), gradient clipping (max norm 1.0), and a cosine-annealed learning rate schedule with linear warmup. Class-weighted cross-entropy loss is optionally available to address class imbalance. The chunk-based training loop broadcasts a shuffled chunk order from rank~0 each epoch, ensuring all workers process chunks in identical sequence while preserving reproducibility across runs.
+
+\begin{table*}[!t]
+\centering
+\caption{Per-class performance for the Hybrid CNN model on top 10 classes by support.}
+\label{tab:cnn-results}
+\begin{tabular}{lrrr}
+\hline
+	\textbf{Service} & \textbf{Accuracy} & \textbf{F1} & \textbf{Support} \\
+\hline
+google-www & 0.9287 & 0.8776 & 7{,}675{,}874 \\
+google-ads & 0.9001 & 0.8427 & 7{,}208{,}589 \\
+google-services & 0.9654 & 0.9679 & 6{,}871{,}469 \\
+google-play & 0.9638 & 0.9613 & 6{,}136{,}568 \\
+google-gstatic & 0.8732 & 0.9061 & 5{,}543{,}479 \\
+youtube & 0.8994 & 0.8928 & 5{,}197{,}257 \\
+instagram & 0.9665 & 0.9613 & 5{,}179{,}999 \\
+google-background & 0.7544 & 0.7952 & 4{,}822{,}433 \\
+google-fonts & 0.7410 & 0.7429 & 4{,}469{,}294 \\
+default-background & 0.7946 & 0.7865 & 4{,}433{,}272 \\
+\hline
+\end{tabular}
+\end{table*}
+
+%-------------------------------------------------------------------------------
+\section{Implementation}
+%-------------------------------------------------------------------------------
+The project utilized the Cloudlab testbed for all training and evaluation. The primary nodes were \texttt{c4130} instances equipped with four NVIDIA V100 GPUs (16GB VRAM each). When availability was limited, we utilized \texttt{d7525} nodes equipped with NVIDIA A30 GPUs (24GB VRAM). 
+
+\subsection{Feature Engineering}
+%-----------------------------------
+Feature engineering constitutes a critical design axis in our system, with markedly different strategies for the tree-based and deep-learning pipelines. Both pipelines draw from the same underlying dataset columns but transform them to suit the inductive biases of the respective model families.
+
+\subsubsection{Common Inputs}
+Both the tree-based models and CNN consume flow-level metadata provided by the CESNET-QUIC22 dataset, including:
+\begin{itemize}
+\item \textbf{Aggregate statistics:} \texttt{DURATION}, \texttt{BYTES}, \texttt{BYTES\_REV}, \texttt{PACKETS}, \texttt{PACKETS\_REV}, \texttt{PPI\_LEN} (per-packet inspection length), \texttt{PPI\_DURATION}, and \texttt{PPI\_ROUNDTRIPS}.
+\item \textbf{Network metadata:} \texttt{SRC\_PORT}, \texttt{DST\_PORT}, \texttt{PROTOCOL}, and \texttt{QUIC\_VERSION}.
+\item \textbf{Histogram arrays:} Four 8-bin histograms capturing distributions of packet sizes and inter-packet times in both directions (\texttt{PHIST\_SRC\_SIZES}, \texttt{PHIST\_DST\_SIZES}, \texttt{PHIST\_SRC\_IPT}, \texttt{PHIST\_DST\_IPT}).
+\item \textbf{Sequence data (CNN only):} The \texttt{PPI} column, a JSON-encoded triplet of lists containing inter-packet times, directions, and payload sizes for the first $N$ packets.
+\end{itemize}
+
+\subsubsection{XGBoost Feature Pipeline}
+Gradient-boosted trees expect a flat, fixed-width numeric feature vector for each sample. Our XGBoost pipeline therefore performs extensive manual feature derivation:
+\begin{enumerate}
+\item \textbf{Histogram expansion:} Each 8-bin histogram is exploded into 8 individual columns (e.g., \texttt{PHIST\_SRC\_SIZES\_BIN\_0} through \texttt{BIN\_7}), yielding 32 histogram features.
+\item \textbf{Extended metadata:} Fields that can be extracted with external network monitoring/analysis tools, such as \texttt{DST\_ASN}, \texttt{DST\_ASN}, \texttt{FLOW\_ENDREASON\_*}.
+\item \textbf{Derived ratios and balances:}
+  \begin{itemize}
+  \item \texttt{TOTAL\_BYTES} $=$ \texttt{BYTES} $+$ \texttt{BYTES\_REV}.
+  \item Directional ratios: $\frac{\texttt{BYTES}+1}{\texttt{BYTES\_REV}+1}$ and similar for packets.
+  \item Balance metrics: $\frac{\texttt{BYTES}-\texttt{BYTES\_REV}}{\texttt{TOTAL\_BYTES}}$ captures asymmetry.
+  \end{itemize}
+\item \textbf{Rates:} \texttt{BYTES\_PER\_SECOND}, \texttt{PACKETS\_PER\_SECOND}, and \texttt{PPI\_DENSITY} $=$ \texttt{PPI\_LEN} / \texttt{PPI\_DURATION}.
+\item \textbf{Temporal:} Parsing \texttt{TIME\_FIRST} and \texttt{TIME\_LAST} yields \texttt{START\_HOUR}, \texttt{START\_MINUTE\_OF\_DAY}, \texttt{START\_DAY\_OF\_WEEK}, \texttt{IS\_WEEKEND}, and \texttt{DURATION\_FROM\_TIMESTAMPS}.
+\item \textbf{Categorical encoding:} \texttt{QUIC\_VERSION} is hashed to a 32-bit integer code.
+\item \textbf{Log transforms:} \texttt{LOG\_TOTAL\_BYTES} and \texttt{LOG\_TOTAL\_PACKETS} compress heavy-tailed distributions via $\log(1+x)$.
+\end{enumerate}
+The final feature vector comprises 16 base columns, 20 derived features, and 32 histogram bins, totaling 68 numeric inputs per flow.
+
+\subsubsection{Hybrid CNN Feature Pipeline}
+The CNN exploits two complementary representations:
+\begin{enumerate}
+\item \textbf{Sequence tensor ($3 \times 30$):} The \texttt{PPI} column is decoded into three parallel channels—inter-packet times (log-transformed), directions ($\pm1$), and packet sizes (log-transformed)—each zero-padded or truncated to exactly 30 time steps. By retaining temporal ordering, the sequence tensor preserves fine-grained dynamics that aggregate histograms discard.
+\item \textbf{Tabular vector (49 dimensions):} A compact set of scalar features is constructed:
+  \begin{itemize}
+  \item Raw flow duration.
+  \item Log-transformed byte and packet counts (forward, reverse, total).
+  \item PPI-derived ratios: \texttt{PPI\_LEN} / \texttt{seq\_len}, \texttt{PPI\_DURATION}, \texttt{PPI\_ROUNDTRIPS}.
+  \item The four histograms, each log-transformed bin-wise, contributing 32 values.
+  \end{itemize}
+\item \textbf{QUIC version embedding:} Rather than hashing, we map \texttt{QUIC\_VERSION} to a learned 16-dimensional embedding, allowing the model to capture version-specific behavior patterns.
+\end{enumerate}
+
+\subsubsection{Normalization}
+Both pipelines apply per-feature standardization. During cache construction, the CNN trainer computes running sums and sums of squares across all training chunks to derive global mean and standard deviation for each sequence channel and tabular column. At inference time, inputs are normalized as $\hat{x} = (x - \mu) / \sigma$. The XGBoost pipeline relies on implicit histogram binning, which is largely invariant to feature scale, so explicit normalization is not applied.
+
+\subsubsection{Design Rationale}
+The divergence in feature engineering reflects the inductive biases of the two model families. Decision-tree ensembles partition the feature space via axis-aligned splits; they benefit from explicit ratio and rate features that encode domain knowledge but ignore the ordering of observations. Convolutional networks, by contrast, excel at learning shift-invariant patterns from ordered sequences, making hand-crafted aggregations less critical while demanding a fixed-length temporal input. By preserving the raw packet sequence for the CNN and expanding aggregate statistics for XGBoost, we tailor each pipeline to its model's strengths.
+
+\subsection{Real-Time Classification}
+%-----------------------------------
+We attempted to build a real-time classification demo using a laptop script to sniff QUIC flows via Scapy. The system buffered the first 30 packets and sent the tensor to an inference server.
+
+A major challenge was that the hybrid model expected detailed tabular statistics that require the entire flow to calculate (e.g., totals, histograms). Computing these in real-time for specific flows amidst background noise proved computationally prohibitive. We attempted to use a version of the CNN relying solely on the Sequence Branch, but performance degraded in real-time scenarios. The lack of per-channel statistics—required for log scaling and normalization—caused inputs to appear uniform, leading the model to predict the same label for all flows.
+
+We deployed a FastAPI backend that loaded the trained Hybrid CNN model using \texttt{torch.load}. It exposed a \texttt{/predict} endpoint accepting a JSON payload containing the specific feature keys required by the model.
+
+We built a frontend using Streamlit to simulate a network agent. The client loaded a JSON file containing a small subset of flows extracted from the QUIC dataset. It replayed these flows to the inference server to simulate incoming network traffic.
+
+%-------------------------------------------------------------------------------
+\section{Evaluation}
+%-------------------------------------------------------------------------------
+
+Table~\ref{tab:overall} summarizes the overall accuracy and macro F1 scores across all five model variants, demonstrating the consistent improvement from simple CPU-bound baselines to the distributed deep learning architecture. The Hybrid CNN, trained on the complete 153 million flow dataset, achieves a 28 percentage point improvement in accuracy over the Decision Tree baseline.
+
+Table~\ref{tab:cnn-results} presents per-class performance for the Hybrid CNN on the top 10 application classes by support. The model demonstrates strong and balanced performance across well-represented services, achieving F1 scores above 0.96 for \texttt{google-services}, \texttt{google-play}, and \texttt{instagram}. Even for more ambiguous classes like \texttt{google-background} and \texttt{default-background}, which represent a diverse mixture of applications, the CNN achieves F1 scores above 0.79, substantially outperforming the tree-based approaches. This improvement demonstrates the value of the Hybrid CNN's architecture: by combining temporal sequence modeling with learned categorical embeddings, the network captures both the fine-grained dynamics of early packets and the aggregate patterns of entire flows, enabling precise discrimination of services with overlapping statistical profiles.
+
+%-------------------------------------------------------------------------------
+\section{Course Topics}
+%-------------------------------------------------------------------------------
+The project directly applies the lectures on QUIC, specifically its design philosophy regarding ossification protection and encrypted transport. As taught, QUIC shifts transport functions to user space over UDP and aggressively encrypts packet metadata—including packet numbers and payloads—to prevent middleboxes from enforcing rigid rules or inspecting connection states. This theoretical foundation explained why traditional Deep Packet Inspection (DPI) fails and necessitated the project’s use of machine learning to analyze statistical side channels. It clarified why only features like packet sizing, inter-arrival timing, and directionality remain as observable "random noise" to the network. A practical overview of "Open World" versus "Closed World" classification challenges in network security would have provided a stronger framework for evaluating the model's performance against background traffic.
+
+%-------------------------------------------------------------------------------
+\bibliographystyle{plain}
+\bibliography{\jobname}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\end{document}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%%  LocalWords:  endnotes includegraphics fread ptr nobj noindent
+%%  LocalWords:  pdflatex acks
